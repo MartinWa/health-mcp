@@ -277,15 +277,7 @@ class OpenWearablesSource:
 
     async def sleep_hours_by_date(self, start: str, end: str) -> dict[str, float]:
         frame, _ = await self._sleep_df(start, end)
-        durations: Any = frame.get("duration_minutes")
-        if durations is None:
-            return {}
-        dates: Any = frame.get("date")
-        return {
-            str(date)[:10]: round(float(minutes) / 60, 2)
-            for date, minutes in zip(dates.tolist(), durations.tolist(), strict=False)
-            if pd.notna(minutes)
-        }
+        return _sleep_hours(frame)
 
     async def person(self) -> dict[str, Any]:
         """Identity and static body data Open Wearables owns; the profile never duplicates it."""
@@ -310,7 +302,9 @@ class OpenWearablesSource:
             "sex": record.get("sex"),
             "gender": record.get("gender"),
             "height_cm": _pick(static, "height_cm", "height"),
-            "body_fat_pct": _pick(static, "body_fat_percentage", "body_fat_pct", "body_fat"),
+            "body_fat_pct": _pick(
+                static, "body_fat_percent", "body_fat_percentage", "body_fat_pct", "body_fat"
+            ),
             "muscle_mass_kg": _pick(static, "muscle_mass_kg", "muscle_mass"),
             "bmi": _pick(static, "bmi"),
             "age": _pick(static, "age"),
@@ -615,7 +609,7 @@ class OpenWearablesSource:
                 self._sleep_df(start_date, end_date),
                 self._workouts_df(start_date, end_date),
             )
-            return A.logging_stats(
+            out = A.logging_stats(
                 {
                     "workouts": _local_days(workouts_pair[0], "start_time", self.tz),
                     "sleep": _local_days(sleep_pair[0], "date", self.tz),
@@ -624,31 +618,53 @@ class OpenWearablesSource:
                 start_date,
                 end_date,
             )
+            truncated = {
+                "weight": weight_pair[1],
+                "sleep": sleep_pair[1],
+                "workouts": workouts_pair[1],
+            }
+            out["fetch_truncated"] = truncated
+            if any(truncated.values()):
+                out["complete"] = False
+                out["warning"] = (
+                    "At least one source hit the page ceiling, so percentages and "
+                    "missing days are computed from a subset of the period."
+                )
+            return out
         except Exception as exc:
             return self._error(exc)
 
     # -- inputs for the coaching composites -------------------------------
-    async def weight_points(self, start: str, end: str) -> list[tuple[str, float]]:
-        frame, _ = await self._weight_df(start, end)
+    async def sleep_hours_with_truncation(
+        self, start: str, end: str
+    ) -> tuple[dict[str, float], bool]:
+        frame, truncated = await self._sleep_df(start, end)
+        return _sleep_hours(frame), truncated
+
+    async def weight_points(self, start: str, end: str) -> tuple[list[tuple[str, float]], bool]:
+        frame, truncated = await self._weight_df(start, end)
         if frame is None or len(frame) == 0 or "weight_kg" not in frame.columns:
-            return []
+            return [], truncated
         ordered: Any = frame.sort_values("date")
-        return [
+        points = [
             (str(row["date"])[:10], float(row["weight_kg"]))
             for _, row in ordered.iterrows()
             if pd.notna(row["weight_kg"])
         ]
+        return points, truncated
 
-    async def workout_count(self, start: str, end: str) -> int:
-        frame, _ = await self._workouts_df(start, end)
-        return 0 if frame is None else len(frame)
+    async def workout_count(self, start: str, end: str) -> tuple[int, bool]:
+        frame, truncated = await self._workouts_df(start, end)
+        return (0 if frame is None else len(frame)), truncated
 
-    async def daily_metrics(self, start: str, end: str) -> dict[str, dict[str, float]]:
+    async def daily_metrics(
+        self, start: str, end: str
+    ) -> tuple[dict[str, dict[str, float]], dict[str, bool]]:
         """Per-day recovery score, resting HR and sleep efficiency for the coach composites."""
         recovery, sleep = await asyncio.gather(
             self._recovery_df(start, end), self._sleep_df(start, end)
         )
-        return {
+        metrics = {
             "recovery_score": _by_day(recovery[0], "date", "recovery_score", self.tz),
             "resting_heart_rate_bpm": _by_day(
                 recovery[0], "date", "resting_heart_rate_bpm", self.tz
@@ -656,15 +672,17 @@ class OpenWearablesSource:
             "sleep_efficiency_pct": _by_day(sleep[0], "date", "efficiency_percent", self.tz),
             "sleep_hours": _by_day(sleep[0], "date", "duration_minutes", self.tz, scale=1 / 60),
         }
+        return metrics, {"recovery": recovery[1], "sleep": sleep[1]}
 
-    async def recovery_days(self, start: str, end: str) -> dict[str, dict[str, Any]]:
-        frame, _ = await self._recovery_df(start, end)
+    async def recovery_days(self, start: str, end: str) -> tuple[dict[str, dict[str, Any]], bool]:
+        frame, truncated = await self._recovery_df(start, end)
         scores = _by_day(frame, "date", "recovery_score", self.tz)
         resting = _by_day(frame, "date", "resting_heart_rate_bpm", self.tz)
-        return {
+        days = {
             day: {"recovery_score": scores.get(day), "resting_heart_rate_bpm": resting.get(day)}
             for day in sorted(set(scores) | set(resting))
         }
+        return days, truncated
 
 
 def _pick(block: dict[str, Any], *names: str) -> Any:
@@ -686,6 +704,20 @@ def _logged_days(frame: pd.DataFrame, column: str) -> int:
         return int(unique)
     except Exception:
         return 0
+
+
+def _sleep_hours(frame: pd.DataFrame) -> dict[str, float]:
+    if frame is None or len(frame) == 0:
+        return {}
+    durations: Any = frame.get("duration_minutes")
+    if durations is None:
+        return {}
+    dates: Any = frame.get("date")
+    return {
+        str(day)[:10]: round(float(minutes) / 60, 2)
+        for day, minutes in zip(dates.tolist(), durations.tolist(), strict=False)
+        if pd.notna(minutes)
+    }
 
 
 def _local_days(frame: pd.DataFrame, column: str, tz: str) -> list[str]:

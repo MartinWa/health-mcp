@@ -75,6 +75,16 @@ class ProfileSource:
     def regimen_plans(self) -> list[dict[str, Any]]:
         return P.regimen_plans(self.current())
 
+    def health(self) -> dict[str, Any]:
+        """Presence/validity for callers that must not treat stale data as current."""
+        self.reload()
+        return {
+            "present": self._present,
+            "valid": (not self._errors) if self._present else None,
+            "stale": bool(self._errors) and self._loaded is not None,
+            "error": self._errors[0] if self._errors else None,
+        }
+
     def refresh(self) -> int:
         return 0
 

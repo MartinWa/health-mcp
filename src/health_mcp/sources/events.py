@@ -61,8 +61,13 @@ class EventsSource:
             return
         self._stamp = stamp
         rows, errors = P.read_events(self.path)
+        if errors:
+            # Keep the last good rows but never present them as current: health()
+            # reports stale and the coaching answers refuse to use them.
+            self._errors = errors
+            return
         self._rows = rows
-        self._errors = errors
+        self._errors = []
 
     def rows(self) -> list[dict[str, Any]]:
         self.reload()
@@ -80,6 +85,16 @@ class EventsSource:
 
     def notes(self, start: str, end: str) -> list[dict[str, Any]]:
         return [row for row in self._in_range(start, end) if row.get("kind") == "note"]
+
+    def health(self) -> dict[str, Any]:
+        self.reload()
+        return {
+            "present": self._present,
+            "valid": (not self._errors) if self._present else None,
+            "stale": bool(self._errors) and bool(self._rows),
+            "error": self._errors[0] if self._errors else None,
+            "rows": len(self._rows),
+        }
 
     def refresh(self) -> int:
         return 0
@@ -106,12 +121,17 @@ class EventsSource:
             validate_range(start_date, end_date)
         except ValueError as exc:
             return {"error": str(exc)}
-        rows = self._in_range(start_date, end_date)
-        out = A.medicine_logs(rows, start_date, end_date)
-        if not self._present:
-            out["note"] = "events.csv is not present; nothing is logged for this period."
-        if self._errors:
-            out["row_errors"] = self._errors[:5]
+        health = self.health()
+        if not health["present"]:
+            return {"error": "events.csv is not available", "source": NAME, "events": health}
+        if not health["valid"]:
+            return {
+                "error": "events.csv could not be parsed, so the log is not trustworthy",
+                "source": NAME,
+                "events": health,
+            }
+        out = A.medicine_logs(self._in_range(start_date, end_date), start_date, end_date)
+        out["events"] = health
         return out
 
     def tools(self) -> list[Any]:

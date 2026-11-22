@@ -142,18 +142,32 @@ def dotted_errors(errors: Iterable[Mapping[str, Any]]) -> list[str]:
     return out
 
 
+def _yaml_error(target: Path, exc: yaml.YAMLError) -> str:
+    # str(exc) embeds the offending source line; keep the position and problem only.
+    problem = getattr(exc, "problem", None) or "syntax error"
+    mark = getattr(exc, "problem_mark", None)
+    if mark is not None:
+        return (
+            f"{target}: YAML parse error at line {mark.line + 1}, "
+            f"column {mark.column + 1}: {problem}"
+        )
+    return f"{target}: YAML parse error: {problem}"
+
+
 def load(path: str | Path) -> Profile:
     target = Path(path)
     try:
         text = target.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
         raise ProfileError(target, [f"{target}: file not found"]) from exc
+    except UnicodeDecodeError as exc:
+        raise ProfileError(target, [f"{target}: not valid UTF-8 (byte {exc.start})"]) from exc
     except OSError as exc:
         raise ProfileError(target, [f"{target}: {exc}"]) from exc
     try:
         raw = yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise ProfileError(target, [f"{target}: YAML parse error: {exc}"]) from exc
+        raise ProfileError(target, [_yaml_error(target, exc)]) from exc
     if not isinstance(raw, dict):
         raise ProfileError(target, [f"{target}: expected a YAML mapping"])
     try:
@@ -310,55 +324,63 @@ def _row_error(number: int, message: str) -> str:
 
 
 def read_events(path: str | Path) -> tuple[list[dict[str, Any]], list[str]]:
-    """Read the event log. Returns rows and dotted-ish row errors; missing file is empty."""
+    """Read the event log. Returns rows and row errors; a missing file is empty."""
     target = Path(path)
     try:
-        handle = target.open(encoding="utf-8-sig", newline="")
+        with target.open(encoding="utf-8-sig", newline="") as handle:
+            return _read_event_rows(target, handle)
     except FileNotFoundError:
         return [], []
+    except UnicodeDecodeError as exc:
+        return [], [f"{target}: not valid UTF-8 (byte {exc.start})"]
+    except csv.Error as exc:
+        return [], [f"{target}: CSV parse error: {exc}"]
     except OSError as exc:
         return [], [f"{target}: {exc}"]
+
+
+def _read_event_rows(target: Path, handle: Any) -> tuple[list[dict[str, Any]], list[str]]:
     rows: list[dict[str, Any]] = []
     errors: list[str] = []
-    with handle:
-        reader = csv.DictReader(handle)
-        header = [name.strip() for name in reader.fieldnames or []]
-        missing = [name for name in EVENT_COLUMNS if name not in header]
-        if missing:
-            return [], [f"{target}: missing column(s) {', '.join(missing)}"]
-        for number, raw in enumerate(reader, start=2):
-            row = {name: (raw.get(name) or "").strip() for name in EVENT_COLUMNS}
-            if not any(row.values()):
-                continue
-            problem = _validate_event(row, number)
-            if problem:
-                errors.append(problem)
-                continue
-            rows.append(row)
+    reader = csv.DictReader(handle)
+    header = [name.strip() for name in reader.fieldnames or []]
+    missing = [name for name in EVENT_COLUMNS if name not in header]
+    if missing:
+        return [], [f"{target}: missing column(s) {', '.join(missing)}"]
+    for number, raw in enumerate(reader, start=2):
+        row = {name: (raw.get(name) or "").strip() for name in EVENT_COLUMNS}
+        if not any(row.values()):
+            continue
+        problem = _validate_event(row, number)
+        if problem:
+            errors.append(problem)
+            continue
+        rows.append(row)
     return rows, errors
 
 
 def _validate_event(row: dict[str, Any], number: int) -> str | None:
+    # Messages carry the row number and field only: event values are private data.
     try:
         date.fromisoformat(row["date"])
     except ValueError:
-        return _row_error(number, f"date {row['date']!r} is not YYYY-MM-DD")
-    kind = row["kind"].lower()
+        return _row_error(number, "date is not YYYY-MM-DD")
+    kind = str(row["kind"]).lower()
     if kind not in EVENT_KINDS:
-        return _row_error(number, f"kind {row['kind']!r} is not one of {', '.join(EVENT_KINDS)}")
+        return _row_error(number, f"kind is not one of {', '.join(EVENT_KINDS)}")
     row["kind"] = kind
     if row["time"]:
         try:
             datetime.strptime(row["time"], "%H:%M")
         except ValueError:
-            return _row_error(number, f"time {row['time']!r} is not HH:MM")
+            return _row_error(number, "time is not HH:MM")
     if kind in DOSE_KINDS and not row["substance"]:
         return _row_error(number, f"{kind} rows need a substance")
     if row["dose"]:
         try:
             row["dose"] = float(row["dose"])
         except ValueError:
-            return _row_error(number, f"dose {row['dose']!r} is not a number")
+            return _row_error(number, "dose is not a number")
     return None
 
 
@@ -389,50 +411,69 @@ def _event_key(row: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(_cell(row.get(name)) for name in EVENT_COLUMNS)
 
 
+def _read_legacy_medicine(source: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    try:
+        with source.open(encoding="utf-8-sig", newline="") as handle:
+            return _parse_legacy_medicine(source, handle)
+    except FileNotFoundError as exc:
+        raise ProfileError(source, [f"{source}: file not found"]) from exc
+    except UnicodeDecodeError as exc:
+        raise ProfileError(source, [f"{source}: not valid UTF-8 (byte {exc.start})"]) from exc
+    except csv.Error as exc:
+        raise ProfileError(source, [f"{source}: CSV parse error: {exc}"]) from exc
+    except OSError as exc:
+        raise ProfileError(source, [f"{source}: {exc}"]) from exc
+
+
+def _parse_legacy_medicine(source: Path, handle: Any) -> tuple[list[dict[str, Any]], list[str]]:
+    errors: list[str] = []
+    imported: list[dict[str, Any]] = []
+    reader = csv.DictReader(handle)
+    fields = {name.strip().lower(): name for name in reader.fieldnames or []}
+    missing = [name for name in LEGACY_MEDICINE_COLUMNS if name not in fields]
+    if missing:
+        raise ProfileError(source, [f"{source}: missing column(s) {', '.join(missing)}"])
+    for number, raw in enumerate(reader, start=2):
+        row = {
+            "date": (raw.get(fields["date"]) or "").strip(),
+            "time": (raw.get(fields["time"]) or "").strip(),
+            "kind": "medication",
+            "substance": (raw.get(fields["substance"]) or "").strip(),
+            "dose": (raw.get(fields["dosage"]) or "").strip(),
+            "unit": (raw.get(fields["unit"]) or "").strip(),
+            "reason": "",
+            "notes": "",
+        }
+        problem = _validate_event(row, number)
+        if problem:
+            errors.append(problem)
+            continue
+        imported.append(row)
+    return imported, errors
+
+
 def migrate_medicine(
     legacy: str | Path, events_path: str | Path, *, dry_run: bool = False
 ) -> dict[str, Any]:
     """One-way import of a legacy medicine.csv into events.csv (`kind: medication`)."""
     source = Path(legacy)
-    try:
-        handle = source.open(encoding="utf-8-sig", newline="")
-    except FileNotFoundError as exc:
-        raise ProfileError(source, [f"{source}: file not found"]) from exc
-    except OSError as exc:
-        raise ProfileError(source, [f"{source}: {exc}"]) from exc
-    errors: list[str] = []
-    imported: list[dict[str, Any]] = []
-    with handle:
-        reader = csv.DictReader(handle)
-        fields = {name.strip().lower(): name for name in reader.fieldnames or []}
-        missing = [name for name in LEGACY_MEDICINE_COLUMNS if name not in fields]
-        if missing:
-            raise ProfileError(source, [f"{source}: missing column(s) {', '.join(missing)}"])
-        for number, raw in enumerate(reader, start=2):
-            row = {
-                "date": (raw.get(fields["date"]) or "").strip(),
-                "time": (raw.get(fields["time"]) or "").strip(),
-                "kind": "medication",
-                "substance": (raw.get(fields["substance"]) or "").strip(),
-                "dose": (raw.get(fields["dosage"]) or "").strip(),
-                "unit": (raw.get(fields["unit"]) or "").strip(),
-                "reason": "",
-                "notes": "",
-            }
-            problem = _validate_event(row, number)
-            if problem:
-                errors.append(problem)
-                continue
-            imported.append(row)
-    existing, existing_errors = read_events(events_path)
-    errors.extend(existing_errors)
+    imported, errors = _read_legacy_medicine(source)
+    destination = Path(events_path)
+    existing, existing_errors = read_events(destination)
+    if existing_errors:
+        # A header typo or a bad row would make read_events omit rows, so rewriting
+        # the file would erase history. Refuse instead; the caller fixes the file.
+        raise ProfileError(
+            destination,
+            ["refusing to rewrite events.csv: destination has errors", *existing_errors],
+        )
     known = {_event_key(row) for row in existing}
     added = [row for row in imported if _event_key(row) not in known]
     if not dry_run:
-        write_events(events_path, [*existing, *added])
+        write_events(destination, [*existing, *added])
     return {
         "legacy": str(source),
-        "events": str(events_path),
+        "events": str(destination),
         "imported": len(added),
         "skipped": len(imported) - len(added),
         "dry_run": dry_run,
@@ -495,8 +536,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(dump(profile), end="")
         return 0
     if args.command == "migrate-medicine":
+        root = Path(settings.profile_dir).resolve()
+        destination = Path(args.events).resolve()
         try:
-            result = migrate_medicine(args.path, args.events, dry_run=args.dry_run)
+            destination.relative_to(root)
+        except ValueError:
+            print(
+                f"refusing to write outside the profile directory {root}: {destination}",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            result = migrate_medicine(args.path, destination, dry_run=args.dry_run)
         except ProfileError as exc:
             for error in exc.errors:
                 print(error, file=sys.stderr)

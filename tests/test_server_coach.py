@@ -289,7 +289,7 @@ def test_goal_progress_uses_the_profile_goal_and_labels_overrides(tmp_path):
     settings = profile_settings(tmp_path)
     sources = build(tmp_path, settings)
     sources["openwearables"].weight_points = async_return(  # type: ignore[method-assign]
-        [("2026-11-01", 80.0), ("2026-11-15", 79.0)]
+        ([("2026-11-01", 80.0), ("2026-11-15", 79.0)], False)
     )
 
     out = run(compose_goal_progress(sources, "2026-11-01", "2026-11-30", "weight"))
@@ -309,7 +309,7 @@ def test_goal_progress_uses_the_profile_goal_and_labels_overrides(tmp_path):
 def test_goal_progress_for_workouts_comes_from_the_profile_too(tmp_path):
     settings = profile_settings(tmp_path)
     sources = build(tmp_path, settings)
-    sources["openwearables"].workout_count = async_return(10)  # type: ignore[method-assign]
+    sources["openwearables"].workout_count = async_return((10, False))  # type: ignore[method-assign]
     out = run(compose_goal_progress(sources, "2026-11-01", "2026-11-30", "workouts"))
     assert out["sessions"] == 10
     assert out["target"] == 20
@@ -335,13 +335,16 @@ def test_readiness_shows_inputs_and_prior_day_volume(tmp_path):
     settings = profile_settings(tmp_path)
     sources = build(tmp_path, settings)
     sources["openwearables"].recovery_days = async_return(  # type: ignore[method-assign]
-        {
-            "2026-11-09": {"recovery_score": 55, "resting_heart_rate_bpm": 60},
-            "2026-11-10": {"recovery_score": 70, "resting_heart_rate_bpm": 58},
-        }
+        (
+            {
+                "2026-11-09": {"recovery_score": 55, "resting_heart_rate_bpm": 60},
+                "2026-11-10": {"recovery_score": 70, "resting_heart_rate_bpm": 58},
+            },
+            False,
+        )
     )
-    sources["openwearables"].sleep_hours_by_date = async_return(  # type: ignore[method-assign]
-        {"2026-11-09": 6.5, "2026-11-10": 8.0}
+    sources["openwearables"].sleep_hours_with_truncation = async_return(  # type: ignore[method-assign]
+        ({"2026-11-09": 6.5, "2026-11-10": 8.0}, False)
     )
     sources["strong"].volume_by_date = async_return(  # type: ignore[method-assign]
         {"2026-11-09": 5000.0, "2026-11-10": 0.0}
@@ -382,18 +385,21 @@ def test_medicine_impact_compares_events_and_daily_metrics(tmp_path):
     settings = profile_settings(tmp_path, events_text=EVENTS)
     sources = build(tmp_path, settings)
     sources["openwearables"].daily_metrics = async_return(  # type: ignore[method-assign]
-        {
-            "recovery_score": {
-                "2026-11-01": 40,
-                "2026-11-02": 50,
-                "2026-11-03": 60,
-                "2026-11-04": 70,
-                "2026-11-05": 80,
-                "2026-11-06": 90,
+        (
+            {
+                "recovery_score": {
+                    "2026-11-01": 40,
+                    "2026-11-02": 50,
+                    "2026-11-03": 60,
+                    "2026-11-04": 70,
+                    "2026-11-05": 80,
+                    "2026-11-06": 90,
+                },
+                "sleep_efficiency_pct": {},
+                "resting_heart_rate_bpm": {},
             },
-            "sleep_efficiency_pct": {},
-            "resting_heart_rate_bpm": {},
-        }
+            {"recovery": False, "sleep": False},
+        )
     )
     out = run(compose_medicine_impact(sources, "2026-11-01", "2026-11-06"))
     assert out["n_substances"] == 1
@@ -458,3 +464,121 @@ def test_medicine_logs_is_callable_through_the_mcp_server(tmp_path):
     assert out["period"] == {"start": "2026-11-01", "end": "2026-11-06"}
     assert out["doses"][0]["substance"] == "example-med"
     assert out["doses"][0]["count"] == 3
+
+
+def replace_profile(tmp_path, text: str) -> None:
+    (tmp_path / "profile" / "profile.yaml").write_text(text, encoding="utf-8")
+
+
+def test_goal_progress_converts_pounds_to_kilograms(tmp_path):
+    settings = profile_settings(tmp_path)
+    replace_profile(
+        tmp_path,
+        "updated: 2026-11-20\nintent:\n  updated: 2026-11-20\n"
+        "  goals: [{metric: bodyweight, target: 170, unit: lb, by: 2027-03-01}]\n",
+    )
+    sources = build(tmp_path, settings)
+    sources["openwearables"].weight_points = async_return(  # type: ignore[method-assign]
+        ([("2026-11-01", 80.0), ("2026-11-15", 79.0)], False)
+    )
+    out = run(compose_goal_progress(sources, "2026-11-01", "2026-11-30", "weight"))
+    assert out["target_kg"] == 77.11
+    assert out["target_original"] == {"value": 170.0, "unit": "lb"}
+
+
+def test_goal_progress_rejects_an_unknown_weight_unit(tmp_path):
+    settings = profile_settings(tmp_path)
+    replace_profile(
+        tmp_path,
+        "updated: 2026-11-20\nintent:\n  updated: 2026-11-20\n"
+        "  goals: [{metric: bodyweight, target: 12, unit: stone}]\n",
+    )
+    sources = build(tmp_path, settings)
+    out = run(compose_goal_progress(sources, "2026-11-01", "2026-11-30", "weight"))
+    assert "unsupported weight unit" in out["error"]
+    assert "kg" in out["supported_units"]
+
+
+def test_goal_progress_labels_a_stale_profile_goal(tmp_path):
+    settings = profile_settings(tmp_path)
+    sources = build(tmp_path, settings)
+    sources["openwearables"].weight_points = async_return(  # type: ignore[method-assign]
+        ([("2026-11-01", 80.0), ("2026-11-15", 79.0)], False)
+    )
+    replace_profile(tmp_path, "updated: not-a-date\n")
+    out = run(compose_goal_progress(sources, "2026-11-01", "2026-11-30", "weight"))
+    assert out["profile"]["stale"] is True
+    assert "last valid copy" in out["warning"]
+
+
+def test_goal_progress_refuses_truncated_weight_data(tmp_path):
+    settings = profile_settings(tmp_path)
+    sources = build(tmp_path, settings)
+    sources["openwearables"].weight_points = async_return(  # type: ignore[method-assign]
+        ([("2026-11-01", 80.0), ("2026-11-15", 79.0)], True)
+    )
+    out = run(compose_goal_progress(sources, "2026-11-01", "2026-11-30", "weight"))
+    assert "fetch ceiling" in out["error"]
+    assert out["fetch_truncated"] == {"weight": True}
+
+
+def test_goal_progress_marks_truncated_workout_counts(tmp_path):
+    settings = profile_settings(tmp_path)
+    sources = build(tmp_path, settings)
+    sources["openwearables"].workout_count = async_return((10, True))  # type: ignore[method-assign]
+    out = run(compose_goal_progress(sources, "2026-11-01", "2026-11-30", "workouts"))
+    assert out["exact"] is False
+    assert out["fetch_truncated"] == {"workouts": True}
+    assert "lower bound" in out["warning"]
+
+
+def test_readiness_flags_truncated_inputs(tmp_path):
+    settings = profile_settings(tmp_path)
+    sources = build(tmp_path, settings)
+    sources["openwearables"].recovery_days = async_return(  # type: ignore[method-assign]
+        ({"2026-11-10": {"recovery_score": 70, "resting_heart_rate_bpm": 58}}, True)
+    )
+    sources["openwearables"].sleep_hours_with_truncation = async_return(  # type: ignore[method-assign]
+        ({"2026-11-10": 8.0}, False)
+    )
+    sources["strong"].volume_by_date = async_return({})  # type: ignore[method-assign]
+    out = run(compose_readiness(sources, "2026-11-10", "2026-11-11"))
+    assert out["complete"] is False
+    assert out["fetch_truncated"] == {"recovery": True, "sleep": False}
+    assert "page ceiling" in out["warning"]
+
+
+def test_medicine_impact_flags_truncated_metrics(tmp_path):
+    settings = profile_settings(tmp_path, events_text=EVENTS)
+    sources = build(tmp_path, settings)
+    sources["openwearables"].daily_metrics = async_return(  # type: ignore[method-assign]
+        (
+            {
+                "recovery_score": {
+                    "2026-11-01": 40,
+                    "2026-11-02": 50,
+                    "2026-11-03": 60,
+                    "2026-11-04": 70,
+                    "2026-11-05": 80,
+                    "2026-11-06": 90,
+                }
+            },
+            {"recovery": True, "sleep": False},
+        )
+    )
+    out = run(compose_medicine_impact(sources, "2026-11-01", "2026-11-06"))
+    assert out["complete"] is False
+    assert out["fetch_truncated"] == {"recovery": True, "sleep": False}
+    assert "page ceiling" in out["warning"]
+
+
+def test_goal_progress_flags_a_deleted_profile(tmp_path):
+    settings = profile_settings(tmp_path)
+    sources = build(tmp_path, settings)
+    sources["openwearables"].weight_points = async_return(  # type: ignore[method-assign]
+        ([("2026-11-01", 80.0), ("2026-11-15", 79.0)], False)
+    )
+    (tmp_path / "profile" / "profile.yaml").unlink()
+    out = run(compose_goal_progress(sources, "2026-11-01", "2026-11-30", "weight"))
+    assert out["profile"]["present"] is False
+    assert "missing" in out["warning"]

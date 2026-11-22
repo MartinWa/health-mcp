@@ -246,3 +246,83 @@ def test_profile_tools_are_registered_even_without_a_profile(tmp_path):
     mcp = create_server(settings)
     names = {tool.name for tool in run(mcp.list_tools())}
     assert {"get_profile", "get_medication_adherence"} <= names
+
+
+def test_adherence_refuses_an_unreadable_log(tmp_path):
+    write_profile(tmp_path)
+    events_path = write_events(tmp_path)
+    settings = settings_for(tmp_path)
+    sources = build(tmp_path, settings)
+    events_path.write_text("date,time,kind,substance,dosage,unit,reason,notes\n", encoding="utf-8")
+    out = run(compose_medication_adherence(sources, "2026-11-20", "2026-11-21"))
+    assert "could not be parsed" in out["error"]
+    assert out["events"]["valid"] is False
+
+
+def test_adherence_refuses_after_the_log_is_deleted(tmp_path):
+    write_profile(tmp_path)
+    events_path = write_events(tmp_path)
+    settings = settings_for(tmp_path)
+    sources = build(tmp_path, settings)
+    events_path.unlink()
+    out = run(compose_medication_adherence(sources, "2026-11-20", "2026-11-21"))
+    assert "not available" in out["error"]
+    assert out["events"]["present"] is False
+
+
+def test_adherence_refuses_an_invalid_profile(tmp_path):
+    path = write_profile(tmp_path)
+    write_events(tmp_path)
+    settings = settings_for(tmp_path)
+    sources = build(tmp_path, settings)
+    path.write_text("updated: not-a-date\n", encoding="utf-8")
+    out = run(compose_medication_adherence(sources, "2026-11-20", "2026-11-21"))
+    assert "profile is unavailable or invalid" in out["error"]
+    assert out["profile"]["valid"] is False
+
+
+def test_non_utf8_profile_does_not_prevent_startup(tmp_path):
+    path = write_profile(tmp_path)
+    path.write_bytes("updated: 2026-11-20\nnotes: naïve\n".encode("utf-16"))
+    settings = settings_for(tmp_path)
+    create_server(settings)
+    block = run(build(tmp_path, settings)["profile"].block())
+    assert block["valid"] is False
+    assert "not valid UTF-8" in block["error"]
+
+
+def test_non_utf8_events_are_reported_not_raised(tmp_path):
+    write_profile(tmp_path)
+    events_path = write_events(tmp_path)
+    events_path.write_bytes(EVENTS.encode("utf-16"))
+    settings = settings_for(tmp_path)
+    sources = build(tmp_path, settings)
+    source = sources["events"]
+    assert source.rows() == []
+    assert run(source.status())["ok"] is False
+    out = run(source.get_medicine_logs("2026-11-20", "2026-11-21"))
+    assert "could not be parsed" in out["error"]
+
+
+def test_medicine_logs_reports_absence_after_delete(tmp_path):
+    write_profile(tmp_path)
+    events_path = write_events(tmp_path)
+    settings = settings_for(tmp_path)
+    source = build(tmp_path, settings)["events"]
+    events_path.unlink()
+    out = run(source.get_medicine_logs("2026-11-20", "2026-11-21"))
+    assert "not available" in out["error"]
+
+
+def test_status_never_echoes_profile_content(tmp_path):
+    import json
+
+    write_profile(tmp_path, "updated: 2026-11-20\nconstraints: [SYNTHETIC_PRIVATE_SENTINEL\n")
+    settings = settings_for(tmp_path)
+    sources = build(tmp_path, settings)
+    cache = CacheStore(tmp_path / "cache", registry.ttls(settings))
+    out = run(compose_status(sources, cache, settings, 1))
+    assert out["profile"]["valid"] is False
+    assert "SYNTHETIC_PRIVATE_SENTINEL" not in json.dumps(out)
+    block = run(sources["profile"].block())
+    assert "SYNTHETIC_PRIVATE_SENTINEL" not in json.dumps(block)

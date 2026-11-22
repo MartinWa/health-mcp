@@ -753,38 +753,67 @@ def medication_adherence(
 ) -> dict[str, Any]:
     start, end = parse_date(start_date), parse_date(end_date)
     days = (end - start).days + 1
-    counts: dict[str, int] = {}
-    dated: dict[str, set[str]] = {}
+    counts: dict[tuple[str, str], int] = {}
+    dated: dict[tuple[str, str], set[str]] = {}
     for row in doses:
         substance = str(row.get("substance") or "").strip().casefold()
+        kind = str(row.get("kind") or "").strip().lower()
         if not substance:
             continue
-        counts[substance] = counts.get(substance, 0) + 1
-        dated.setdefault(substance, set()).add(str(row.get("date") or ""))
-    items: list[dict[str, Any]] = []
-    unparsed: list[dict[str, Any]] = []
-    planned_names: set[str] = set()
+        key = (kind, substance)
+        counts[key] = counts.get(key, 0) + 1
+        dated.setdefault(key, set()).add(str(row.get("date") or ""))
+    # One plan row per substance is the normal case, but morning/evening rows for the
+    # same substance are legitimate: group them so a logged dose is counted once.
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
     for plan in planned:
         substance = str(plan.get("substance") or "").strip()
         if not substance:
             continue
-        key = substance.casefold()
-        planned_names.add(key)
-        logged = counts.get(key, 0)
+        kind = str(plan.get("kind") or "medication").strip().lower()
+        key = (kind, substance.casefold())
+        group = groups.setdefault(
+            key,
+            {
+                "substance": substance,
+                "kind": kind,
+                "per_day": 0.0,
+                "schedules": [],
+                "doses": [],
+                "units": set(),
+                "unparsed": [],
+            },
+        )
+        if plan.get("dose") is not None or plan.get("unit"):
+            group["doses"].append({"dose": plan.get("dose"), "unit": plan.get("unit")})
+        if plan.get("unit"):
+            group["units"].add(str(plan["unit"]))
         per_day = schedule_per_day(plan.get("schedule"))
         if per_day is None:
+            group["unparsed"].append(plan.get("schedule"))
+            group["schedules"].append(plan.get("schedule"))
+            continue
+        group["per_day"] += per_day
+        group["schedules"].append(plan.get("schedule"))
+    items: list[dict[str, Any]] = []
+    unparsed: list[dict[str, Any]] = []
+    planned_keys: set[tuple[str, str]] = set(groups)
+    for key, group in groups.items():
+        logged = counts.get(key, 0)
+        if group["per_day"] <= 0:
             unparsed.append(
                 {
-                    "substance": substance,
-                    "schedule": plan.get("schedule"),
+                    "substance": group["substance"],
+                    "kind": group["kind"],
+                    "schedules": group["unparsed"],
                     "logged": logged,
                     "note": "schedule not interpreted; count it by hand",
                 }
             )
             continue
-        expected = per_day * days
+        expected = group["per_day"] * days
         missing_days = None
-        if per_day >= 1:
+        if group["per_day"] >= 1:
             missing_days = sum(
                 1
                 for offset in range(days)
@@ -792,12 +821,13 @@ def medication_adherence(
             )
         items.append(
             {
-                "substance": substance,
-                "kind": plan.get("kind"),
-                "dose": plan.get("dose"),
-                "unit": plan.get("unit"),
-                "schedule": plan.get("schedule"),
-                "per_day": round(per_day, 3),
+                "substance": group["substance"],
+                "kind": group["kind"],
+                "plan_rows": len(group["schedules"]),
+                "schedules": group["schedules"],
+                "doses": group["doses"],
+                "units": sorted(group["units"]),
+                "per_day": round(group["per_day"], 3),
                 "expected": round(expected, 1),
                 "logged": logged,
                 "adherence_pct": round(100 * logged / expected, 1) if expected else None,
@@ -815,14 +845,15 @@ def medication_adherence(
         "adherence_pct": round(100 * total_logged / total_expected, 1) if total_expected else None,
         "unparsed_schedules": unparsed,
         "unplanned_logged": [
-            {"substance": substance, "logged": count}
-            for substance, count in sorted(counts.items())
-            if substance not in planned_names
+            {"substance": substance, "kind": kind, "logged": count}
+            for (kind, substance), count in sorted(counts.items())
+            if (kind, substance) not in planned_keys
         ],
         "definition": (
-            "Planned doses come from profile.yaml regimen (medication/supplement rows); "
-            "logged doses are events.csv rows with kind medication or supplement. "
-            "Symptom and note rows never count as doses."
+            "Planned doses come from profile.yaml regimen (medication/supplement rows), "
+            "grouped by kind and substance so each logged dose is counted once; logged "
+            "doses are events.csv rows with kind medication or supplement. Symptom and "
+            "note rows never count as doses."
         ),
     }
     if not items:
@@ -1098,6 +1129,7 @@ def workload(
             "volume_kg": round(float(item.get("value") or 0), 1),
         }
         for item in _items(series)
+        if item.get("bucket_start")
     ]
     weeks.sort(key=lambda row: str(row["week_start"]))
     rows = []
@@ -1126,7 +1158,18 @@ def workload(
                 "flag": flag,
             }
         )
-    shown = [row for row in rows if str(row.get("week_start") or "") >= start_date]
+    start, end = parse_date(start_date), parse_date(end_date)
+    shown = []
+    for row in rows:
+        week_start = parse_date(str(row.get("week_start")))
+        week_end = week_start + timedelta(days=6)
+        row["complete"] = week_start >= start and week_end <= end
+        if not row["complete"]:
+            # A partial week cannot be compared with complete weeks.
+            row["flag"] = "incomplete"
+        if week_end < start or week_start > end:
+            continue
+        shown.append(row)
     current = shown[-1] if shown else None
     if len(shown) > max_weeks:
         shown = shown[-max_weeks:]

@@ -113,6 +113,10 @@ what they compute: `get_body` splits latest values from averaged vitals,
 is labelled as an override), `get_readiness` returns per-day inputs and no score,
 `get_workload` flags weekly volume against its 4-week ACWR baseline, and
 `get_medicine_impact` compares same-day metrics — an association, not causality.
+Goal targets come from `profile.yaml`: `kg` and `lb` are converted and any other
+weight unit is rejected. When a local file is unreadable or missing, or an
+upstream fetch hits the page ceiling, the affected answer returns an error or an
+`exact: false` warning instead of a quiet subset.
 
 Generate the exact list for a deployment (this is the only sanctioned source for
 the README table and for the ZeroClaw `auto_approve` list):
@@ -155,10 +159,12 @@ uv run python -m health_mcp.profile migrate-medicine medicine.csv   # one-way im
 
 If `profile.yaml` is missing or invalid the server still starts: the profile
 tools report `present: false` or `valid: false` plus the error path, `get_status`
-shows the same, and every other tool keeps working. A broken file never loses
-the last valid copy. The MCP instructions carry the profile's `intent` only —
-never `constraints` or `regimen`, which would be re-sent on every unrelated
-question.
+shows the same, and the API tools keep working. A broken file never loses the
+last valid copy, but answers that depend on it (adherence, goal progress,
+medicine impact) say so instead of guessing. Diagnostics carry field paths and
+positions only, never the file's content. The MCP instructions carry the
+profile's `intent` only — never `constraints` or `regimen`, which would be
+re-sent on every unrelated question.
 
 ## Container
 

@@ -153,7 +153,8 @@ class OpenWearablesClient:
                 "start_time": s,
                 "end_time": e,
                 "resolution": resolution,
-                "types": ",".join(types) if types else None,
+                # OW declares `types` as a list of query parameters, so send it repeated.
+                "types": list(types) if types else None,
             },
             max_pages=max_pages,
         )

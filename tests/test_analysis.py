@@ -118,7 +118,9 @@ def test_medication_adherence_ignores_symptoms_and_unplanned_doses():
     assert out["expected"] == 6.0
     assert out["logged"] == 3
     assert out["adherence_pct"] == 50.0
-    assert out["unplanned_logged"] == [{"substance": "unplanned", "logged": 1}]
+    assert out["unplanned_logged"] == [
+        {"substance": "unplanned", "kind": "supplement", "logged": 1}
+    ]
     assert "kind medication or supplement" in out["definition"]
 
 
@@ -129,3 +131,87 @@ def test_medication_adherence_without_interpretable_schedules():
     assert out["adherence_pct"] is None
     assert out["unparsed_schedules"][0]["substance"] == "example-med"
     assert "cannot be computed" in out["interpretation"]
+
+
+def test_adherence_groups_plan_rows_for_one_substance_without_double_counting():
+    planned = [
+        {
+            "kind": "medication",
+            "substance": "example-med",
+            "dose": 50,
+            "unit": "µg",
+            "schedule": "daily",
+        },
+        {
+            "kind": "medication",
+            "substance": "Example-Med",
+            "dose": 25,
+            "unit": "µg",
+            "schedule": "daily",
+        },
+    ]
+    doses = [
+        {"date": "2026-11-01", "kind": "medication", "substance": "example-med"},
+        {"date": "2026-11-02", "kind": "medication", "substance": "example-med"},
+    ]
+    out = A.medication_adherence(planned, doses, "2026-11-01", "2026-11-02")
+    assert out["n"] == 1
+    item = out["items"][0]
+    assert item["plan_rows"] == 2
+    assert item["per_day"] == 2.0
+    assert item["expected"] == 4.0
+    assert item["logged"] == 2
+    assert out["expected"] == 4.0
+    assert out["logged"] == 2
+    assert out["adherence_pct"] == 50.0
+    assert out["unplanned_logged"] == []
+
+
+def test_adherence_counts_a_substance_once_even_with_two_kinds():
+    planned = [
+        {"kind": "medication", "substance": "example-med", "schedule": "daily"},
+        {"kind": "supplement", "substance": "example-med", "schedule": "daily"},
+    ]
+    doses = [
+        {"date": "2026-11-01", "kind": "medication", "substance": "example-med"},
+        {"date": "2026-11-01", "kind": "supplement", "substance": "example-med"},
+    ]
+    out = A.medication_adherence(planned, doses, "2026-11-01", "2026-11-01")
+    assert out["n"] == 2
+    assert out["logged"] == 2
+    assert out["expected"] == 2.0
+    assert out["adherence_pct"] == 100.0
+
+
+def test_workload_includes_an_intersecting_midweek_bucket_and_flags_it_incomplete():
+    series = {
+        "items": [
+            {"bucket_start": "2026-10-05", "value": 100.0},
+            {"bucket_start": "2026-10-12", "value": 100.0},
+            {"bucket_start": "2026-10-19", "value": 100.0},
+            {"bucket_start": "2026-10-26", "value": 100.0},
+            {"bucket_start": "2026-11-02", "value": 140.0},
+        ]
+    }
+    out = A.workload(series, "2026-11-03", "2026-11-05")
+    assert [row["week_start"] for row in out["weeks"]] == ["2026-11-02"]
+    row = out["weeks"][0]
+    assert row["complete"] is False
+    assert row["flag"] == "incomplete"
+    assert row["baseline_4w"] == 100.0
+    assert row["acwr"] == 1.4
+
+
+def test_workload_keeps_full_week_flags_for_a_complete_monday_to_sunday_range():
+    series = {
+        "items": [
+            {"bucket_start": "2026-10-05", "value": 100.0},
+            {"bucket_start": "2026-10-12", "value": 100.0},
+            {"bucket_start": "2026-10-19", "value": 100.0},
+            {"bucket_start": "2026-10-26", "value": 100.0},
+            {"bucket_start": "2026-11-02", "value": 140.0},
+        ]
+    }
+    out = A.workload(series, "2026-11-02", "2026-11-08")
+    assert out["weeks"][0]["complete"] is True
+    assert out["weeks"][0]["flag"] == "spike"

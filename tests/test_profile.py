@@ -161,7 +161,8 @@ def test_read_events_rejects_unknown_kinds_and_missing_columns(tmp_path):
     bad_kind = EVENTS.replace("kind,substance", "kind,substance").replace("note,,,,", "mystery,,,,")
     rows, errors = P.read_events(write(tmp_path, "kinds.csv", bad_kind))
     assert len(rows) == 3
-    assert "mystery" in errors[0]
+    assert "kind is not one of" in errors[0]
+    assert "mystery" not in errors[0]
     no_columns = write(tmp_path, "narrow.csv", "date,kind\n2026-11-20,symptom\n")
     rows, errors = P.read_events(no_columns)
     assert rows == []
@@ -204,7 +205,8 @@ def test_migrate_medicine_requires_the_legacy_columns(tmp_path):
         P.migrate_medicine(legacy, tmp_path / "events.csv")
 
 
-def test_cli_validate_show_and_migrate(tmp_path, capsys):
+def test_cli_validate_show_and_migrate(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("PROFILE_DIR", str(tmp_path))
     path = write(tmp_path, "profile.yaml", VALID)
     assert P.main(["--profile", str(path), "validate"]) == 0
     assert "OK (updated 2026-11-20)" in capsys.readouterr().out
@@ -237,3 +239,81 @@ def test_cli_validate_defaults_to_the_argument_path(tmp_path, capsys):
     path = write(tmp_path, "profile.yaml", VALID)
     assert P.main(["validate", str(path)]) == 0
     assert str(path) in capsys.readouterr().out
+
+
+def test_cli_refuses_to_write_outside_the_profile_directory(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("PROFILE_DIR", str(tmp_path / "profile"))
+    legacy = write(tmp_path, "medicine.csv", LEGACY)
+    outside = tmp_path / "outside" / "events.csv"
+    code = P.main(["--events", str(outside), "migrate-medicine", str(legacy)])
+    assert code == 2
+    assert "refusing to write outside" in capsys.readouterr().err
+    assert not outside.exists()
+
+
+def test_yaml_errors_never_echo_the_source_text(tmp_path):
+    broken = "updated: 2026-11-20\nconstraints:\n  injuries: [SYNTHETIC_PRIVATE_SENTINEL\n"
+    path = write(tmp_path, "profile.yaml", broken)
+    with pytest.raises(P.ProfileError) as caught:
+        P.load(path)
+    message = caught.value.errors[0]
+    assert "SYNTHETIC_PRIVATE_SENTINEL" not in message
+    assert "YAML parse error at line" in message
+    assert "column" in message
+    _, errors = P.read(path)
+    assert errors and "SYNTHETIC_PRIVATE_SENTINEL" not in errors[0]
+
+
+def test_non_utf8_profile_is_a_sanitized_validation_error(tmp_path):
+    path = tmp_path / "profile.yaml"
+    path.write_bytes("updated: 2026-11-20\nnotes: naïve\n".encode("utf-16"))
+    with pytest.raises(P.ProfileError) as caught:
+        P.load(path)
+    assert "not valid UTF-8" in caught.value.errors[0]
+    profile, errors = P.read(path)
+    assert profile is None
+    assert errors and "not valid UTF-8" in errors[0]
+
+
+def test_non_utf8_events_are_reported_not_raised(tmp_path):
+    path = tmp_path / "events.csv"
+    path.write_bytes(EVENTS.encode("utf-16"))
+    rows, errors = P.read_events(path)
+    assert rows == []
+    assert errors and "not valid UTF-8" in errors[0]
+
+
+def test_event_row_errors_do_not_echo_values(tmp_path):
+    text = (
+        "date,time,kind,substance,dose,unit,reason,notes\n"
+        "2026-13-01,08:00,medication,SYNTHETIC_PRIVATE_SENTINEL,50,µg,daily,\n"
+    )
+    rows, errors = P.read_events(write(tmp_path, "events.csv", text))
+    assert rows == []
+    assert "SYNTHETIC_PRIVATE_SENTINEL" not in errors[0]
+    assert errors[0].startswith("row 2: date is not")
+
+
+def test_migration_refuses_to_rewrite_an_unreadable_destination(tmp_path):
+    broken = write(tmp_path, "events.csv", "date,time,kind,substance,dosage,unit,reason,notes\n")
+    before = broken.read_bytes()
+    legacy = write(tmp_path, "medicine.csv", LEGACY)
+    with pytest.raises(P.ProfileError) as caught:
+        P.migrate_medicine(legacy, broken)
+    assert "refusing to rewrite" in caught.value.errors[0]
+    assert broken.read_bytes() == before
+    assert not list(tmp_path.glob("events.csv.bak-*"))
+
+
+def test_migration_refuses_to_rewrite_a_log_with_a_bad_row(tmp_path):
+    broken = write(
+        tmp_path,
+        "events.csv",
+        "date,time,kind,substance,dose,unit,reason,notes\nnot-a-date,,symptom,,,,,x\n",
+    )
+    before = broken.read_bytes()
+    legacy = write(tmp_path, "medicine.csv", LEGACY)
+    with pytest.raises(P.ProfileError) as caught:
+        P.migrate_medicine(legacy, broken)
+    assert "refusing to rewrite" in caught.value.errors[0]
+    assert broken.read_bytes() == before

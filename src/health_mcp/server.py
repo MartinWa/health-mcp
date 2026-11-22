@@ -49,6 +49,17 @@ GOAL_ALIASES: dict[str, frozenset[str]] = {
     "weight": frozenset({"bodyweight", "weight", "body_weight"}),
     "workouts": frozenset({"workouts", "sessions", "training_days"}),
 }
+WEIGHT_UNITS: dict[str, float] = {
+    "kg": 1.0,
+    "kgs": 1.0,
+    "kilogram": 1.0,
+    "kilograms": 1.0,
+    "lb": 0.45359237,
+    "lbs": 0.45359237,
+    "pound": 0.45359237,
+    "pounds": 0.45359237,
+}
+WORKOUT_UNITS = frozenset({"", "count", "counts", "session", "sessions", "workout", "workouts"})
 
 INSTRUCTIONS = (
     "You are a health data analyst, not a clinician. "
@@ -236,6 +247,20 @@ async def compose_medication_adherence(
     events = sources["events"]
     if not isinstance(profile, ProfileSource) or not isinstance(events, EventsSource):
         return {"error": "profile and events must be the profile and events sources"}
+    profile_health = profile.health()
+    events_health = events.health()
+    if not profile_health["present"] or not profile_health["valid"]:
+        return {
+            "error": "the profile is unavailable or invalid, so the planned regimen is unknown",
+            "profile": profile_health,
+        }
+    if not events_health["present"]:
+        return {"error": "events.csv is not available", "events": events_health}
+    if not events_health["valid"]:
+        return {
+            "error": "events.csv could not be parsed, so missed doses cannot be distinguished",
+            "events": events_health,
+        }
     planned = profile.regimen_plans()
     if not planned:
         return {
@@ -243,7 +268,9 @@ async def compose_medication_adherence(
             "source": "profile",
         }
     doses = events.doses(start_date, end_date)
-    return A.medication_adherence(planned, doses, start_date, end_date)
+    out = A.medication_adherence(planned, doses, start_date, end_date)
+    out["sources"] = {"profile": profile_health, "events": events_health}
+    return out
 
 
 def _profile_goal(profile: ProfileSource | None, metric: str) -> Any:
@@ -274,8 +301,34 @@ async def compose_goal_progress(
         return {"error": "get_goal_progress needs openwearables", "missing": ["openwearables"]}
     profile = sources.get("profile")
     profile_source = profile if isinstance(profile, ProfileSource) else None
+    profile_health = profile_source.health() if profile_source is not None else None
     goal = _profile_goal(profile_source, metric)
-    resolved = float(target) if target is not None else (goal.target if goal else None)
+    warnings: list[str] = []
+    resolved: float | None
+    target_original: dict[str, Any] | None = None
+    if target is not None:
+        resolved = float(target)
+        target_source = "argument_override"
+    elif goal is not None:
+        target_source = "profile"
+        target_original = {"value": goal.target, "unit": goal.unit}
+        if metric == "weight":
+            unit = (goal.unit or "kg").strip().lower()
+            if unit not in WEIGHT_UNITS:
+                return {
+                    "error": f"unsupported weight unit {goal.unit!r} in the profile goal",
+                    "supported_units": sorted(WEIGHT_UNITS),
+                }
+            resolved = goal.target * WEIGHT_UNITS[unit]
+        else:
+            resolved = goal.target
+            if (goal.unit or "").strip().lower() not in WORKOUT_UNITS:
+                warnings.append(
+                    f"goal unit {goal.unit!r} is not a session count; the target is used as one"
+                )
+    else:
+        resolved = None
+        target_source = "none"
     if resolved is None:
         current = profile_source.current() if profile_source is not None else None
         available = (
@@ -288,23 +341,52 @@ async def compose_goal_progress(
             "available_metrics": available,
             "hint": "pass target= for an explicit override; the answer labels it as one",
         }
-    target_source = "argument_override" if target is not None else "profile"
+    if target is None and profile_health is not None:
+        if not profile_health["present"]:
+            warnings.append("profile.yaml is missing; the goal comes from the last valid copy")
+        elif profile_health["stale"]:
+            warnings.append(
+                "the profile is currently invalid; the goal comes from the last valid copy"
+            )
     deadline = goal.by.isoformat() if goal is not None and goal.by is not None else None
     try:
         if metric == "weight":
-            points = await openwearables.weight_points(start_date, end_date)
+            points, truncated = await openwearables.weight_points(start_date, end_date)
+            if truncated:
+                return {
+                    "error": (
+                        "weight data hit the fetch ceiling, so the last point is not "
+                        "necessarily the latest; no projection is produced"
+                    ),
+                    "fetch_truncated": {"weight": True},
+                    "period": {"start": start_date, "end": end_date},
+                }
             out = A.weight_goal_progress(
                 points, resolved, target_source=target_source, deadline=deadline
             )
+            out["fetch_truncated"] = {"weight": False}
         else:
-            sessions = await openwearables.workout_count(start_date, end_date)
+            sessions, truncated = await openwearables.workout_count(start_date, end_date)
             out = A.workout_goal_progress(
                 sessions, resolved, target_source=target_source, deadline=deadline
             )
+            out["fetch_truncated"] = {"workouts": truncated}
+            if truncated:
+                out["exact"] = False
+                warnings.append(
+                    "the workout fetch hit the page ceiling; the session count is a lower bound"
+                )
+            else:
+                out["exact"] = True
     except Exception as exc:
         return {"error": str(exc), "source": "openwearables"}
     out["profile_metric"] = goal.metric if goal is not None else None
+    out["target_original"] = target_original
+    if profile_health is not None:
+        out["profile"] = profile_health
     out["period"] = {"start": start_date, "end": end_date}
+    if warnings:
+        out["warning"] = "; ".join(warnings)
     return out
 
 
@@ -319,9 +401,9 @@ async def compose_readiness(
     if not isinstance(openwearables, OpenWearablesSource):
         return {"error": "get_readiness needs openwearables", "missing": ["openwearables"]}
     try:
-        recovery, sleep = await asyncio.gather(
+        (recovery, recovery_truncated), (sleep, sleep_truncated) = await asyncio.gather(
             openwearables.recovery_days(start_date, end_date),
-            openwearables.sleep_hours_by_date(start_date, end_date),
+            openwearables.sleep_hours_with_truncation(start_date, end_date),
         )
     except Exception as exc:
         return {"error": str(exc), "source": "openwearables"}
@@ -354,10 +436,17 @@ async def compose_readiness(
     out = A.readiness_inputs(days)
     out["period"] = {"start": start_date, "end": end_date}
     out["sources"] = {"openwearables": True, "strong": isinstance(strong, StrongSource)}
+    truncated = {"recovery": recovery_truncated, "sleep": sleep_truncated}
+    out["fetch_truncated"] = truncated
+    out["complete"] = not any(truncated.values())
     if not isinstance(strong, StrongSource):
         out["note"] = "Prior-day lifting volume is unavailable: strong-data is not configured."
     elif volume_error is not None:
         out["volume_error"] = volume_error
+    if any(truncated.values()):
+        out["warning"] = (
+            "Recovery or sleep hit the page ceiling; the affected days are a subset of the period."
+        )
     return out
 
 
@@ -371,7 +460,9 @@ async def compose_workload(
     strong = sources.get("strong")
     if not isinstance(strong, StrongSource):
         return {"error": "get_workload needs strong", "missing": ["strong"]}
-    baseline_start = (parse_date(start_date) - timedelta(days=28)).isoformat()
+    start = parse_date(start_date)
+    week_start = start - timedelta(days=start.weekday())
+    baseline_start = (week_start - timedelta(days=28)).isoformat()
     try:
         series = await strong.weekly_volume_series(baseline_start, end_date)
     except Exception as exc:
@@ -393,21 +484,36 @@ async def compose_medicine_impact(
     openwearables = sources["openwearables"]
     if not isinstance(events, EventsSource) or not isinstance(openwearables, OpenWearablesSource):
         return {"error": "get_medicine_impact needs the events and openwearables sources"}
+    events_health = events.health()
+    if not events_health["present"] or not events_health["valid"]:
+        return {
+            "error": "events.csv is unavailable or unreadable, so doses cannot be compared",
+            "events": events_health,
+        }
     doses = events.doses(start_date, end_date)
     if not doses:
         return {
             "error": "no medication or supplement rows logged in this period",
             "source": "events",
+            "events": events_health,
         }
     try:
-        metrics = await openwearables.daily_metrics(start_date, end_date)
+        metrics, truncated = await openwearables.daily_metrics(start_date, end_date)
     except Exception as exc:
         return {"error": str(exc), "source": "openwearables"}
     series = {
         key: metrics.get(key, {})
         for key in ("sleep_efficiency_pct", "recovery_score", "resting_heart_rate_bpm")
     }
-    return A.medicine_impact(doses, series, start_date, end_date)
+    out = A.medicine_impact(doses, series, start_date, end_date)
+    out["events"] = events_health
+    out["fetch_truncated"] = truncated
+    out["complete"] = not any(truncated.values())
+    if any(truncated.values()):
+        out["warning"] = (
+            "Sleep or recovery hit the page ceiling; the comparison uses a subset of days."
+        )
+    return out
 
 
 async def compose_status(
