@@ -91,6 +91,13 @@ jobs:
           pull: true
           provenance: false
           tags: health-mcp:ci
+          # A sentinel rather than the package version: check_container.sh compares
+          # this label with what /healthz reports, so a Dockerfile that stops
+          # plumbing HEALTH_MCP_VERSION fails CI instead of shipping a stale number.
+          build-args: |
+            HEALTH_MCP_VERSION=ci-sentinel
+          labels: |
+            org.opencontainers.image.version=ci-sentinel
           no-cache: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
           cache-from: type=gha,scope=ci-production
           cache-to: type=gha,scope=ci-production,mode=max

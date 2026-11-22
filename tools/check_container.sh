@@ -13,6 +13,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The release build stamps org.opencontainers.image.version; a local dev build has
+# no label, so the assertion below only runs when one is present. A stale
+# __version__ inside a tagged image is invisible otherwise: /healthz said 0.1.0 on
+# the 0.1.1 and 0.1.2 releases.
+image_version=$(docker image inspect "$image" \
+  --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' 2>/dev/null || true)
+
 container=$(
   docker run --detach --name "$name" --network none --read-only \
     --cap-drop ALL --security-opt no-new-privileges:true \
@@ -41,12 +48,25 @@ urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).read()
   sleep 1
 done
 
-docker exec --interactive "$container" python - <<'PY'
+docker exec --interactive --env "EXPECTED_VERSION=$image_version" "$container" python - <<'PY'
+import json
+import os
 import sys
 import urllib.error
 import urllib.request
 
 token = "synthetic-ci-token-never-used-for-runtime"
+
+expected_version = os.environ.get("EXPECTED_VERSION", "")
+with urllib.request.urlopen("http://127.0.0.1:8000/healthz", timeout=5) as response:
+    reported = json.load(response)
+if expected_version and reported.get("version") != expected_version:
+    print(
+        f"FAIL: /healthz reports {reported.get('version')!r} but the image label is "
+        f"{expected_version!r}; the package version and the tag disagree",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 def status(path, *, token=None, method="GET"):
@@ -76,5 +96,5 @@ if authenticated == 401:
     print("FAIL: /mcp rejected the configured bearer token", file=sys.stderr)
     sys.exit(1)
 
-print(f"Container contract OK (authenticated /mcp returned {authenticated}).")
+print(f"Container contract OK (authenticated /mcp returned {authenticated}, version {reported['version']}).")
 PY

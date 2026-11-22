@@ -14,6 +14,7 @@ from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from pydantic import Field
 
+from . import __version__
 from . import analysis as A
 from . import profile as P
 from . import sources as registry
@@ -27,7 +28,7 @@ from .sources.strong import StrongSource
 from .store import CacheStore
 from .utils import parse_date, today_local, validate_range
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("health_mcp.server")
 
 COMPOSITE_EXPOSURE: dict[str, frozenset[str]] = {
     "get_overview": AGENTS_ALL,
@@ -544,6 +545,7 @@ async def compose_status(
     cache: CacheStore,
     settings: Settings,
     tool_count: int,
+    skipped: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     statuses = await asyncio.gather(
         *[source.status() for source in sources.values()], return_exceptions=True
@@ -562,9 +564,10 @@ async def compose_status(
     return {
         "today": today_local(settings.tz),
         "timezone": settings.tz,
-        "server_version": _version(),
+        "server_version": __version__,
         "tool_count": tool_count,
         "sources": per_source,
+        "skipped": dict(skipped or {}),
         "cache": cache.info(),
         "profile": profile_block,
     }
@@ -589,12 +592,16 @@ def create_server(
     cache: CacheStore | None = None,
 ) -> FastMCP:
     settings = settings or Settings()
+    plan = registry.plan_sources(settings)
     cache_store = cache or CacheStore(settings.cache_dir, registry.ttls(settings))
     built: dict[str, Source] = (
-        dict(sources) if sources is not None else registry.build_sources(settings, cache_store)
+        dict(sources)
+        if sources is not None
+        else registry.build_sources(settings, cache_store, plan=plan)
     )
     if not built:
         raise RuntimeError("No sources are enabled, so there is nothing to serve.")
+    skipped = {name: reason for name, reason in plan.skipped.items() if name not in built}
 
     @asynccontextmanager
     async def lifespan(_: FastMCP) -> AsyncIterator[None]:
@@ -684,8 +691,10 @@ def create_server(
 
     @mcp.tool
     async def get_status() -> dict[str, Any]:
-        """Server status: today, enabled sources, reachability, cache age and profile presence."""
-        return await compose_status(built, cache_store, settings, len(await mcp.list_tools()))
+        """Server status: today, enabled and skipped sources, cache age, profile."""
+        return await compose_status(
+            built, cache_store, settings, len(await mcp.list_tools()), skipped
+        )
 
     @mcp.tool
     async def refresh_cache(
@@ -708,12 +717,6 @@ def create_server(
     return mcp
 
 
-def _version() -> str:
-    from . import __version__
-
-    return __version__
-
-
 def main() -> None:
     import sys
 
@@ -724,11 +727,26 @@ def main() -> None:
 
         from .asgi import create_app
 
+        log.info(
+            "http server",
+            extra={
+                "fields": {
+                    "version": __version__,
+                    "host": settings.mcp_host,
+                    "port": settings.mcp_port,
+                    "path": settings.mcp_path,
+                    "transport": "http",
+                }
+            },
+        )
         uvicorn.run(
             create_app(settings),
             host=settings.mcp_host,
             port=settings.mcp_port,
             workers=1,
+            access_log=False,
+            log_config=None,
+            log_level=None,
         )
         return
     try:

@@ -27,6 +27,10 @@ def configured(settings: Settings) -> bool:
     return settings.profile_path.exists()
 
 
+def skip_reason(settings: Settings) -> str:
+    return f"no profile.yaml at {settings.profile_path}"
+
+
 class ProfileSource:
     NAME: ClassVar[str] = NAME
     cache_namespace: ClassVar[str] = CACHE_NAMESPACE

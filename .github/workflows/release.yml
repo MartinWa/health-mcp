@@ -87,6 +87,8 @@ jobs:
           pull: true
           provenance: false
           outputs: type=image,name=${{ steps.release.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            HEALTH_MCP_VERSION=${{ steps.release.outputs.version }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.release.outputs.commit }}
@@ -103,6 +105,8 @@ jobs:
           pull: true
           provenance: false
           outputs: type=image,name=${{ steps.release.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            HEALTH_MCP_VERSION=${{ steps.release.outputs.version }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.release.outputs.commit }}
@@ -180,6 +184,11 @@ jobs:
           if [ "$latest_release" = "$RELEASE_TAG" ]; then
             # Point latest at the tested multi-platform index; nothing is rebuilt.
             docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE@$DIGEST"
+            moved=$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Manifest.Digest}}' | tr -d '"')
+            if [ "$moved" != "$DIGEST" ]; then
+              echo "::error::latest resolves to $moved, not the tested $DIGEST."
+              exit 1
+            fi
             printf 'latest now points to %s@%s\n' "$IMAGE" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "Skipping latest: $RELEASE_TAG is not the current stable release."
@@ -195,8 +204,16 @@ jobs:
           package=${GITHUB_REPOSITORY#*/}
           repository="${owner,,}/${package,,}"
           api_path="users/${owner,,}/packages/container/${package,,}"
-          if [ "$(gh api "$api_path" --jq .visibility 2>/dev/null)" != public ]; then
-            gh api --method PATCH "$api_path" -f visibility=public >/dev/null 2>&1 || true
+          current=$(gh api "$api_path" --jq .visibility 2>/dev/null || echo "")
+          if [ "$current" != public ]; then
+            echo "Package visibility is '${current:-unknown}'; attempting to make it public."
+            # No `|| true`: a 403 here means the token cannot manage this package,
+            # which is a different problem from a visibility setting and has to be
+            # visible in the log rather than reported as a bare "not public".
+            gh api --method PATCH "$api_path" -f visibility=public > /dev/null || {
+              echo "::error::Could not set ghcr.io/$repository to public. The API error above is the cause: a token without packages:write for this package returns 403, which needs a PACKAGE_TOKEN secret with write:packages. A 404 means the package is not visible to the token at all."
+              exit 1
+            }
           fi
           if curl --fail --silent --output /dev/null "https://ghcr.io/token?scope=repository:${repository}:pull"; then
             echo "ghcr.io/$repository is publicly pullable." >> "$GITHUB_STEP_SUMMARY"
