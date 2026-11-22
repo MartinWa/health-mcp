@@ -270,7 +270,7 @@ def intent_digest(intent: Intent | None, max_chars: int = 800) -> str:
     """The only profile text that may join the server instructions: intent, never constraints."""
     if intent is None:
         return ""
-    lines: list[str] = ["Profile intent (authored by the user, not a clinical record):"]
+    lines: list[str] = []
     goals = [
         " ".join(
             part
@@ -296,7 +296,10 @@ def intent_digest(intent: Intent | None, max_chars: int = 800) -> str:
         lines.append("Program: " + ", ".join(part for part in parts if part))
     if intent.notes:
         lines.append(f"Notes: {intent.notes}")
-    return "\n".join(lines)[:max_chars]
+    if not lines:
+        return ""
+    header = "Profile intent (authored by the user, not a clinical record):"
+    return "\n".join([header, *lines])[:max_chars]
 
 
 def regimen_plans(profile: Profile | None) -> list[dict[str, Any]]:

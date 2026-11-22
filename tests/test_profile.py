@@ -137,6 +137,11 @@ def test_intent_digest_never_includes_constraints(tmp_path):
     assert P.intent_digest(None) == ""
 
 
+def test_intent_digest_is_empty_when_the_section_has_no_content(tmp_path):
+    path = write(tmp_path, "empty.yaml", "updated: 2026-11-20\nintent:\n  updated: 2026-11-20\n")
+    assert P.intent_digest(P.load(path).intent) == ""
+
+
 def test_regimen_plans_flattens_medications_and_supplements(tmp_path):
     profile = P.load(write(tmp_path, "profile.yaml", VALID))
     plans = P.regimen_plans(profile)
