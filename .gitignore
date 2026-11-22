@@ -1,0 +1,41 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+secrets.env
+
+# Personal data — never commit
+data/
+*.csv
+# ...except synthetic test fixtures
+!tests/fixtures/**/*.csv
+*.parquet
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.dump
+*.bak
+*.backup
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.pyright/
+node_modules/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Private working notes (contains infrastructure details)
+planning/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log

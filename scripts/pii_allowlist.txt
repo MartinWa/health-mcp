@@ -1,0 +1,7 @@
+# Allowlist for scripts/pii_audit.sh.
+# Format: <extended-regex matched against the rg output line>|<reason>
+# Keep each entry as narrow as the placeholder it justifies. A blank line
+# after the pipe is a valid reason only if it is obvious from the regex.
+#
+# Each entry below is deliberately narrow and must stay that way.
+README\.md:.*github\.com/MartinWa/strong-data|public source repo of this project; the owner handle is the intentional public namespace
