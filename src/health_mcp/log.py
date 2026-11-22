@@ -23,9 +23,17 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
+# HTTP clients log full request URLs at INFO: dates, user ids and exercise names.
+# Those are health arguments, so the dependency loggers stay at WARNING and only
+# our own records (tool name, duration, status) reach the log.
+QUIET_LOGGERS = ("httpx", "httpcore")
+
+
 def configure_logging(level: str = "INFO") -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())
     root = logging.getLogger()
     root.handlers = [handler]
     root.setLevel(level.upper())
+    for name in QUIET_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)

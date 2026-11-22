@@ -248,3 +248,77 @@ def test_empty_items_are_not_an_error():
         assert payload["items"] == []
 
     run(go())
+
+
+def test_exercise_record_and_yearly_paths_are_encoded_and_parameterised():
+    seen: list[tuple[str, dict[str, str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.raw_path.split(b"?")[0].decode(), dict(request.url.params)))
+        return httpx.Response(200, json=envelope(items=[], count=0))
+
+    client = strong_client(handler)
+
+    async def go():
+        try:
+            await client.exercise_progress(
+                "Back Squat (barbell)",
+                start="2026-01-01",
+                end="2026-01-31",
+                group_by="session",
+                program="Upper",
+            )
+            await client.exercise_records("Back Squat", start="2026-01-01", end="2026-01-31")
+            await client.records("est_1rm", start="2026-01-01", end="2026-01-31")
+            await client.records(
+                "bodyweight", start="2026-01-01", end="2026-01-31", program="Calisthenics"
+            )
+            await client.yearly()
+            await client.yearly_pace(year=2026, as_of="2026-06-30")
+            await client.yearly_curve(year=2026, years="2025,2026", as_of="2026-06-30")
+        finally:
+            await client.aclose()
+
+    run(go())
+    assert seen[0] == (
+        "/api/v1/exercises/Back%20Squat%20%28barbell%29/progress",
+        {
+            "start": "2026-01-01",
+            "end": "2026-01-31",
+            "group_by": "session",
+            "program": "Upper",
+        },
+    )
+    assert seen[1][0] == "/api/v1/exercises/Back%20Squat/records"
+    assert seen[1][1] == {"start": "2026-01-01", "end": "2026-01-31"}
+    assert seen[2][0] == "/api/v1/records/est-1rm"
+    assert seen[3][0] == "/api/v1/records/bodyweight"
+    assert seen[3][1]["program"] == "Calisthenics"
+    assert seen[4] == ("/api/v1/yearly", {})
+    assert seen[5] == ("/api/v1/yearly/pace", {"year": "2026", "as_of": "2026-06-30"})
+    assert seen[6] == (
+        "/api/v1/yearly/curve",
+        {"year": "2026", "years": "2025,2026", "as_of": "2026-06-30"},
+    )
+
+
+def test_blank_exercise_and_unknown_record_kind_fail_before_the_request():
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json=envelope(items=[], count=0))
+
+    client = strong_client(handler)
+
+    async def go():
+        try:
+            with pytest.raises(ValueError, match="blank"):
+                await client.exercise_progress("   ", start="2026-01-01", end="2026-01-31")
+            with pytest.raises(ValueError, match="Unknown record kind"):
+                await client.records("volume", start="2026-01-01", end="2026-01-31")
+        finally:
+            await client.aclose()
+
+    run(go())
+    assert calls["n"] == 0

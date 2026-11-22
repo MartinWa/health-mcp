@@ -29,7 +29,7 @@ def registered(mcp) -> list[str]:
 def test_both_sources_registers_exactly_the_documented_surface(tmp_path):
     settings = both_settings(tmp_path)
     mcp = create_server(settings)
-    assert registered(mcp) == tools_module.names(settings, all_sources=True)
+    assert registered(mcp) == tools_module.names(settings)
 
 
 def test_strong_only_install_registers_no_openwearables_tools(tmp_path):
@@ -62,7 +62,7 @@ def test_exposure_sets_match_the_registered_surface(tmp_path):
         assert exposed <= registered_names
     assert set(COMPOSITE_EXPOSURE) <= registered_names
     assert all(
-        agents == frozenset({"health", "health-coach"}) for agents in COMPOSITE_EXPOSURE.values()
+        agents and agents <= {"health", "health-coach"} for agents in COMPOSITE_EXPOSURE.values()
     )
 
 
@@ -258,3 +258,18 @@ def test_in_memory_client_lists_tools_and_calls_one_per_source(tmp_path):
     assert lifting.data["total_volume_kg"] == 500.0
     assert status.data["sources"]["strong"]["ok"] is True
     assert status.data["tool_count"] == len(tools)
+
+
+def test_tier_b_tools_are_exposed_to_the_health_agent_only(tmp_path):
+    settings = both_settings(tmp_path)
+    health = set(tools_module.names(settings, agent="health"))
+    coach = set(tools_module.names(settings, agent="health-coach"))
+    tier_b = {
+        "get_exercise_detail",
+        "get_lifting_records",
+        "get_lifting_sets",
+        "get_yearly_progress",
+    }
+    assert tier_b <= health
+    assert not tier_b & coach
+    assert {"get_lifting_summary", "get_overview", "get_status"} <= health & coach

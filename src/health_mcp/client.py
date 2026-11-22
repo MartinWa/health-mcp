@@ -153,10 +153,55 @@ class OpenWearablesClient:
                 "start_time": s,
                 "end_time": e,
                 "resolution": resolution,
-                "types": ",".join(types) if types else None,
+                # OW declares `types` as a list of query parameters, so send it repeated.
+                "types": list(types) if types else None,
             },
             max_pages=max_pages,
         )
 
     async def user(self, uid: str) -> dict[str, Any]:
         return await self._get(f"/api/v1/users/{quote(uid, safe='')}")
+
+    async def personal_record(self, uid: str) -> dict[str, Any]:
+        return await self._get(self._user(uid, "personal-record"))
+
+    async def body(
+        self, uid: str, *, average_period: int = 7, latest_window_hours: int = 4
+    ) -> dict[str, Any]:
+        payload = await self._get(
+            self._user(uid, "summaries/body"),
+            {"average_period": average_period, "latest_window_hours": latest_window_hours},
+        )
+        return payload if isinstance(payload, dict) else {}
+
+    async def body_static(self, uid: str) -> dict[str, Any]:
+        payload = await self.body(uid)
+        slow = payload.get("slow_changing") or payload.get("static")
+        return slow if isinstance(slow, dict) else {}
+
+    async def data_sources(self, uid: str) -> dict[str, Any]:
+        payload = await self._get(self._user(uid, "data-sources"))
+        return payload if isinstance(payload, dict) else {}
+
+    async def connections(self, uid: str) -> list[dict[str, Any]]:
+        payload = await self._get(self._user(uid, "connections"))
+        return (
+            [row for row in payload if isinstance(row, dict)] if isinstance(payload, list) else []
+        )
+
+    async def data_summary(
+        self, uid: str, *, start: str | None = None, end: str | None = None
+    ) -> dict[str, Any]:
+        payload = await self._get(
+            self._user(uid, "summaries/data"), {"start_date": start, "end_date": end}
+        )
+        return payload if isinstance(payload, dict) else {}
+
+    async def sleep_sessions(
+        self, uid: str, s: str, e: str, *, max_pages: int = DEFAULT_MAX_PAGES
+    ) -> Page:
+        return await self._paginated(
+            self._user(uid, "events/sleep"),
+            {"start_date": s, "end_date": e, "include": "stages"},
+            max_pages=max_pages,
+        )

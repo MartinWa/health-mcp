@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -66,6 +67,10 @@ SESSION_SORT_KEYS = frozenset({"date", "program", "sets", "start_time", "volume"
 SET_SORT_KEYS = frozenset(
     {"date", "est_1rm", "exercise", "reps", "rpe", "set_order", "set_time", "volume", "weight"}
 )
+RECORD_ENDPOINTS = {
+    "est_1rm": "records/est-1rm",
+    "bodyweight": "records/bodyweight",
+}
 RETRYABLE = frozenset({429, 500, 502, 503, 504})
 
 
@@ -88,6 +93,13 @@ def _error_body(response: httpx.Response) -> dict[str, Any]:
         return {}
     error = body.get("error") if isinstance(body, dict) else None
     return error if isinstance(error, dict) else {}
+
+
+def _exercise(name: str) -> str:
+    text = name.strip()
+    if not text:
+        raise ValueError("exercise name must not be blank")
+    return quote(text, safe="")
 
 
 def _validate_sort(sort: str | None, allowed: frozenset[str]) -> str | None:
@@ -284,6 +296,75 @@ class StrongDataClient:
             ) from exc
         return await self._get(
             path, {"start": start, "end": end, "limit": limit, "program": program}
+        )
+
+    # -- exercises --------------------------------------------------------
+    async def exercise_progress(
+        self,
+        name: str,
+        *,
+        start: str,
+        end: str,
+        group_by: str = "day",
+        program: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._get(
+            f"exercises/{_exercise(name)}/progress",
+            {"start": start, "end": end, "group_by": group_by, "program": program},
+        )
+
+    async def exercise_records(
+        self,
+        name: str,
+        *,
+        start: str,
+        end: str,
+        program: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._get(
+            f"exercises/{_exercise(name)}/records",
+            {"start": start, "end": end, "program": program},
+        )
+
+    # -- records and yearly ----------------------------------------------
+    async def records(
+        self,
+        kind: str,
+        *,
+        start: str,
+        end: str,
+        program: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            path = RECORD_ENDPOINTS[kind]
+        except KeyError as exc:
+            names = ", ".join(RECORD_ENDPOINTS)
+            raise ValueError(f"Unknown record kind {kind!r}; allowed: {names}") from exc
+        return await self._get(path, {"start": start, "end": end, "program": program})
+
+    async def yearly(self, *, program: str | None = None) -> dict[str, Any]:
+        return await self._get("yearly", {"program": program})
+
+    async def yearly_pace(
+        self,
+        *,
+        year: int | None = None,
+        as_of: str | None = None,
+        program: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._get("yearly/pace", {"year": year, "as_of": as_of, "program": program})
+
+    async def yearly_curve(
+        self,
+        *,
+        year: int | None = None,
+        years: str | None = None,
+        as_of: str | None = None,
+        program: str | None = None,
+    ) -> dict[str, Any]:
+        return await self._get(
+            "yearly/curve",
+            {"year": year, "years": years, "as_of": as_of, "program": program},
         )
 
     # -- sessions and raw sets -------------------------------------------

@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import time
 from collections.abc import Awaitable, Callable
+from datetime import date
 from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import Field
@@ -15,18 +17,25 @@ from .. import analysis as A
 from ..config import Settings
 from ..store import CacheStore
 from ..strong_client import StrongDataClient, StrongDataError
-from ..utils import validate_range
+from ..utils import parse_date, today_local, validate_range
 from .base import AGENTS_ALL, DateStr, MaxPoints, PageLimit
 
 NAME = "strong"
 CACHE_NAMESPACE = "strong"
 MAX_EXPANDED_SESSIONS = 10
 EXPAND_CONCURRENCY = 4
+SETS_HARD_CAP = 200
+RECORDS_HARD_CAP = 100
+EXERCISE_RECORD_ROWS = 30
+CURVE_YEARS = re.compile(r"^\d{4}(,\d{4})*$")
+UNSAFE_CACHE_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
 
 TrendMetric = Literal["volume", "sessions", "volume_per_session", "training_time"]
 Bucket = Literal["day", "week", "month", "year"]
 GroupBy = Literal["program", "muscle", "exercise"]
 BreakdownDimension = Literal["weekday", "program", "muscle", "exercise"]
+ExerciseGroupBy = Literal["day", "session"]
+RecordKind = Literal["est_1rm", "bodyweight"]
 SortKey = Literal[
     "date",
     "-date",
@@ -41,12 +50,40 @@ SortKey = Literal[
     "program",
     "-program",
 ]
+SetSortKey = Literal[
+    "date",
+    "-date",
+    "est_1rm",
+    "-est_1rm",
+    "exercise",
+    "-exercise",
+    "reps",
+    "-reps",
+    "rpe",
+    "-rpe",
+    "set_order",
+    "-set_order",
+    "set_time",
+    "-set_time",
+    "volume",
+    "-volume",
+    "weight",
+    "-weight",
+]
+PointsCap = Annotated[
+    int | None,
+    Field(description="Max points to return; default from DEFAULT_MAX_POINTS", ge=10, le=1000),
+]
 
 EXPOSURE: dict[str, frozenset[str]] = {
     "get_lifting_summary": AGENTS_ALL,
     "get_lifting_trend": AGENTS_ALL,
     "get_lifting_breakdown": AGENTS_ALL,
     "get_lifting_sessions": AGENTS_ALL,
+    "get_exercise_detail": frozenset({"health"}),
+    "get_lifting_records": frozenset({"health"}),
+    "get_lifting_sets": frozenset({"health"}),
+    "get_yearly_progress": frozenset({"health"}),
 }
 
 
@@ -93,7 +130,8 @@ class StrongSource:
         digest = hashlib.sha256(
             (path + json.dumps(clean, sort_keys=True, default=str)).encode("utf-8")
         ).hexdigest()[:16]
-        slug = path.replace("/", "-")
+        # Exercise names reach the path, so the slug must survive CacheStore.SAFE_NAME.
+        slug = UNSAFE_CACHE_CHARS.sub("-", path.replace("/", "-")).strip("-")[:48] or "payload"
         return f"{slug}-{digest}"
 
     async def _get(
@@ -185,6 +223,13 @@ class StrongSource:
         )
         return A.strong_compact(summary, weekly)
 
+    async def weekly_volume_series(self, start: str, end: str) -> dict[str, Any]:
+        return await self._get(
+            "series/volume",
+            {"start": start, "end": end, "bucket": "week"},
+            lambda: self._client.series("volume", start=start, end=end, bucket="week"),
+        )
+
     async def daily(self, day: str) -> dict[str, Any]:
         try:
             summary, page = await asyncio.gather(
@@ -219,6 +264,10 @@ class StrongSource:
             self.get_lifting_trend,
             self.get_lifting_breakdown,
             self.get_lifting_sessions,
+            self.get_exercise_detail,
+            self.get_lifting_records,
+            self.get_lifting_sets,
+            self.get_yearly_progress,
         ]
 
     async def get_lifting_summary(
@@ -420,6 +469,205 @@ class StrongSource:
             out["offset"] = offset
             out["next_offset"] = offset + len(sessions) if out.get("has_more") else None
             out["period"] = {"start": start_date, "end": end_date}
+            return out
+        except Exception as exc:
+            return self._error(exc)
+
+    async def get_exercise_detail(
+        self,
+        start_date: DateStr,
+        end_date: DateStr,
+        exercise: Annotated[str, Field(description="Exact exercise name, e.g. 'Squat'")],
+        group_by: Annotated[
+            ExerciseGroupBy, Field(description="One progress point per day or per session")
+        ] = "day",
+        program: Annotated[str | None, Field(description="Filter to one program")] = None,
+        max_points: PointsCap = None,
+    ) -> dict[str, Any]:
+        """One exercise: est. 1RM, top weight and volume over time, plus best sets by reps."""
+        try:
+            validate_range(start_date, end_date)
+            name = exercise.strip()
+            if not name:
+                return {"error": "exercise must not be blank"}
+            params = {"start": start_date, "end": end_date, "program": program}
+            progress, records = await asyncio.gather(
+                self._get(
+                    f"exercises/{name}/progress",
+                    {**params, "group_by": group_by},
+                    lambda: self._client.exercise_progress(
+                        name,
+                        start=start_date,
+                        end=end_date,
+                        group_by=group_by,
+                        program=program,
+                    ),
+                ),
+                self._get(
+                    f"exercises/{name}/records",
+                    params,
+                    lambda: self._client.exercise_records(
+                        name, start=start_date, end=end_date, program=program
+                    ),
+                ),
+            )
+            out = A.strong_exercise_detail(
+                progress,
+                records,
+                name,
+                max_points or self.settings.default_max_points,
+                EXERCISE_RECORD_ROWS,
+            )
+            out["period"] = {"start": start_date, "end": end_date}
+            return out
+        except Exception as exc:
+            return self._error(exc)
+
+    async def get_lifting_records(
+        self,
+        start_date: DateStr,
+        end_date: DateStr,
+        kind: Annotated[
+            RecordKind,
+            Field(description="est_1rm (Epley estimate) or bodyweight (ranked by reps)"),
+        ] = "est_1rm",
+        program: Annotated[str | None, Field(description="Filter to one program")] = None,
+        limit: Annotated[
+            int | None,
+            Field(description="Rows to return (hard cap 100)", ge=1, le=RECORDS_HARD_CAP),
+        ] = None,
+    ) -> dict[str, Any]:
+        """Best sets per exercise: estimated 1RM, or bodyweight sets ranked by reps."""
+        try:
+            validate_range(start_date, end_date)
+            count = min(limit or self.settings.default_page_limit, RECORDS_HARD_CAP)
+            params = {"start": start_date, "end": end_date, "program": program}
+            payload = await self._get(
+                f"records/{kind.replace('_', '-')}",
+                params,
+                lambda: self._client.records(kind, start=start_date, end=end_date, program=program),
+            )
+            out = A.strong_records(payload, kind, count)
+            out["period"] = {"start": start_date, "end": end_date}
+            return out
+        except Exception as exc:
+            return self._error(exc)
+
+    async def get_lifting_sets(
+        self,
+        start_date: DateStr,
+        end_date: DateStr,
+        exercise: Annotated[str | None, Field(description="Filter to one exercise")] = None,
+        muscle: Annotated[str | None, Field(description="Filter to one muscle group")] = None,
+        weighted: Annotated[bool | None, Field(description="Only weighted sets")] = None,
+        limit: Annotated[
+            int | None, Field(description="Rows to return (hard cap 200)", ge=1, le=SETS_HARD_CAP)
+        ] = None,
+        offset: Annotated[int, Field(description="Skip first N sets", ge=0)] = 0,
+        sort: Annotated[
+            SetSortKey, Field(description="Sort key, '-' prefix for descending")
+        ] = "set_time",
+    ) -> dict[str, Any]:
+        """Raw set history (opt-in detail), capped at 200 rows with exercise/muscle filters."""
+        try:
+            validate_range(start_date, end_date)
+            count = min(limit or self.settings.default_page_limit, SETS_HARD_CAP)
+            params = {
+                "start": start_date,
+                "end": end_date,
+                "exercise": exercise,
+                "muscle": muscle,
+                "weighted": weighted,
+                "limit": count,
+                "offset": offset,
+                "sort": sort,
+            }
+            page = await self._get(
+                "sets",
+                params,
+                lambda: self._client.sets(
+                    start=start_date,
+                    end=end_date,
+                    exercise=exercise,
+                    muscle=muscle,
+                    weighted=weighted,
+                    limit=count,
+                    offset=offset,
+                    sort=sort,
+                ),
+            )
+            out = A.strong_sets(page)
+            out["offset"] = offset
+            out["next_offset"] = offset + out["returned"] if out.get("has_more") else None
+            out["limit"] = count
+            out["period"] = {"start": start_date, "end": end_date}
+            return out
+        except Exception as exc:
+            return self._error(exc)
+
+    async def get_yearly_progress(
+        self,
+        year: Annotated[
+            int | None,
+            Field(
+                description="Calendar year; defaults to the current local year", ge=2000, le=2100
+            ),
+        ] = None,
+        as_of: Annotated[
+            DateStr | None,
+            Field(description="Cut-off date inside that year; defaults to today, or Dec 31"),
+        ] = None,
+        program: Annotated[str | None, Field(description="Filter to one program")] = None,
+        include_curve: Annotated[
+            bool, Field(description="Add the cumulative day-of-year curve")
+        ] = False,
+        curve_years: Annotated[
+            str | None, Field(description="Comma-separated years for the curve, e.g. '2024,2025'")
+        ] = None,
+        max_points: PointsCap = None,
+    ) -> dict[str, Any]:
+        """Yearly totals, year-to-date pace and projection; optional cumulative curve."""
+        try:
+            today = parse_date(today_local(self.tz))
+            cut_off = parse_date(as_of) if as_of else None
+            target = year or (cut_off or today).year
+            if cut_off is None:
+                cut_off = today if target == today.year else date(target, 12, 31)
+            if cut_off.year != target:
+                raise ValueError(f"as_of {cut_off.isoformat()} is not in year {target}")
+            if curve_years is not None:
+                if not CURVE_YEARS.match(curve_years):
+                    raise ValueError("curve_years must be comma-separated years, e.g. '2024,2025'")
+                if not all(2000 <= int(part) <= 2100 for part in curve_years.split(",")):
+                    raise ValueError("curve_years must be between 2000 and 2100")
+            as_of_text = cut_off.isoformat()
+            params = {"year": target, "as_of": as_of_text, "program": program}
+            yearly, pace = await asyncio.gather(
+                self._get(
+                    "yearly",
+                    {"program": program},
+                    lambda: self._client.yearly(program=program),
+                ),
+                self._get(
+                    "yearly/pace",
+                    params,
+                    lambda: self._client.yearly_pace(
+                        year=target, as_of=as_of_text, program=program
+                    ),
+                ),
+            )
+            out = A.strong_yearly(yearly, pace, as_of_text)
+            out["year"] = target
+            if include_curve:
+                curve = await self._get(
+                    "yearly/curve",
+                    {**params, "years": curve_years},
+                    lambda: self._client.yearly_curve(
+                        year=target, years=curve_years, as_of=as_of_text, program=program
+                    ),
+                )
+                out["curve"] = A.strong_curve(curve, max_points or self.settings.default_max_points)
+            out["period"] = {"start": f"{target}-01-01", "end": as_of_text}
             return out
         except Exception as exc:
             return self._error(exc)

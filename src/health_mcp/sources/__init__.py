@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from ..config import Settings
 from ..store import CacheStore
-from . import openwearables, strong
+from . import events, openwearables, profile, strong
 from .base import Source
 
 AGENTS = ("health", "health-coach")
@@ -26,6 +26,8 @@ MODULES: tuple[SourceSpec, ...] = (
         openwearables.NAME, openwearables.EXPOSURE, openwearables.configured, openwearables.build
     ),
     SourceSpec(strong.NAME, strong.EXPOSURE, strong.configured, strong.build),
+    SourceSpec(profile.NAME, profile.EXPOSURE, profile.configured, profile.build),
+    SourceSpec(events.NAME, events.EXPOSURE, events.configured, events.build),
 )
 
 NAMES: tuple[str, ...] = tuple(spec.name for spec in MODULES)
@@ -63,6 +65,9 @@ def ttls(settings: Settings) -> dict[str, int]:
     return {
         "openwearables": settings.cache_ttl_hours,
         "strong": settings.strong_cache_ttl_hours,
+        # Local files: nothing is cached, the TTL only keeps the namespace known.
+        "profile": 0,
+        "events": 0,
     }
 
 
