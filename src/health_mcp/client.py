@@ -13,6 +13,7 @@ from urllib.parse import quote
 import httpx
 
 RETRYABLE = frozenset({429, 500, 502, 503, 504})
+SERVER_ERRORS = frozenset({500, 502, 503, 504})
 DEFAULT_MAX_PAGES = 20
 MAX_SPLIT_DEPTH = 4
 
@@ -72,19 +73,23 @@ class OpenWearablesClient:
             await self._client.aclose()
 
     async def _get(
-        self, path: str, params: dict[str, Any] | None = None, *, retries: int | None = None
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        *,
+        retry_5xx: bool = True,
     ) -> Any:
         clean = {key: value for key, value in (params or {}).items() if value is not None}
-        attempts = self.max_retries if retries is None else retries
         last: Exception | None = None
-        for attempt in range(attempts + 1):
+        for attempt in range(self.max_retries + 1):
             try:
                 response = await self._client.get(path, params=clean)
                 response.raise_for_status()
                 return response.json()
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code if exc.response is not None else 0
-                if status in RETRYABLE and attempt < attempts:
+                retryable = status in RETRYABLE and (retry_5xx or status not in SERVER_ERRORS)
+                if retryable and attempt < self.max_retries:
                     last = exc
                     await asyncio.sleep(self.backoff * 2**attempt)
                     continue
@@ -93,7 +98,7 @@ class OpenWearablesClient:
                 ) from exc
             except (httpx.ConnectError, httpx.TimeoutException, httpx.ReadError) as exc:
                 last = exc
-                if attempt < attempts:
+                if attempt < self.max_retries:
                     await asyncio.sleep(self.backoff * 2**attempt)
                     continue
                 raise OpenWearablesError(f"Open Wearables is unavailable: {exc}") from exc
@@ -105,6 +110,7 @@ class OpenWearablesClient:
         params: dict[str, Any] | None = None,
         *,
         max_pages: int = DEFAULT_MAX_PAGES,
+        fallback: bool = False,
     ) -> Page:
         rows: list[dict[str, Any]] = []
         cursor: str | None = None
@@ -116,11 +122,12 @@ class OpenWearablesClient:
             if cursor:
                 query["cursor"] = cursor
             try:
-                # A repeated cursor that fails is deterministic, and the date-window
-                # fallback re-reads the same rows, so a cursor page is not retried.
-                data = await self._get(path, query, retries=0 if cursor else None)
+                # A repeated cursor that 5xxes is what the date-window fallback exists
+                # for, so retrying it only delays the split. 429 and network errors stay
+                # retryable, and an endpoint without a fallback keeps every retry.
+                data = await self._get(path, query, retry_5xx=not (fallback and cursor))
             except OpenWearablesError as exc:
-                if pages == 0:
+                if pages == 0 or exc.status not in SERVER_ERRORS:
                     raise
                 log.warning(
                     "paging stopped; falling back to date windows",
@@ -128,7 +135,7 @@ class OpenWearablesClient:
                         "fields": {
                             "endpoint": path.rsplit("/", 1)[-1],
                             "pages": pages,
-                            "status": getattr(exc, "status", None),
+                            "status": exc.status,
                         }
                     },
                 )
@@ -147,6 +154,7 @@ class OpenWearablesClient:
         end: str,
         *,
         extra: dict[str, Any] | None = None,
+        pad_days: int = 0,
         max_pages: int = DEFAULT_MAX_PAGES,
         depth: int = 0,
     ) -> Page:
@@ -154,10 +162,12 @@ class OpenWearablesClient:
 
         Open Wearables answers a repeated cursor for some endpoints with 500, which
         would otherwise discard every row after the first page. The windows are
-        disjoint, so a split returns the same rows the cursor would have.
+        disjoint, so a split returns the same rows the cursor would have. `pad_days`
+        widens each half into its sibling for endpoints that filter a session by both
+        its start and its end, so a session crossing the boundary is still fetched.
         """
         params = {**(extra or {}), "start_date": start, "end_date": end}
-        page = await self._paginated(path, params, max_pages=max_pages)
+        page = await self._paginated(path, params, max_pages=max_pages, fallback=True)
         try:
             first, last = date.fromisoformat(start), date.fromisoformat(end)
         except ValueError:
@@ -165,27 +175,41 @@ class OpenWearablesClient:
         if not page.failed or depth >= MAX_SPLIT_DEPTH or first >= last:
             return page
         middle = first + (last - first) // 2
+        left_end = min(middle + timedelta(days=pad_days), last)
+        right_start = max(middle + timedelta(days=1 - pad_days), first)
         halves = await asyncio.gather(
             self._paginated_days(
-                path, start, middle.isoformat(), extra=extra, max_pages=max_pages, depth=depth + 1
+                path,
+                start,
+                left_end.isoformat(),
+                extra=extra,
+                pad_days=pad_days,
+                max_pages=max_pages,
+                depth=depth + 1,
             ),
             self._paginated_days(
                 path,
-                (middle + timedelta(days=1)).isoformat(),
+                right_start.isoformat(),
                 end,
                 extra=extra,
+                pad_days=pad_days,
                 max_pages=max_pages,
                 depth=depth + 1,
             ),
             return_exceptions=True,
         )
-        if any(isinstance(half, BaseException) for half in halves):
-            return page
-        left, right = (half for half in halves if isinstance(half, Page))
+        recovered = [half for half in halves if isinstance(half, Page)]
+        pages = page.pages + sum(half.pages for half in recovered)
+        if len(recovered) != 2:
+            # A sibling failed: keep what every successful window recovered next to the
+            # rows already in hand, and report the answer as incomplete.
+            rows = _unique_rows([*page.rows, *(row for half in recovered for row in half.rows)])
+            return Page(rows=rows, truncated=True, pages=pages, failed=True)
+        left, right = recovered
         return Page(
             rows=_unique_rows([*left.rows, *right.rows]),
             truncated=left.truncated or right.truncated,
-            pages=page.pages + left.pages + right.pages,
+            pages=pages,
         )
 
     def _user(self, uid: str, suffix: str) -> str:
@@ -201,7 +225,9 @@ class OpenWearablesClient:
         return await self._paginated_days(self._user(uid, "summaries/recovery"), s, e)
 
     async def workouts(self, uid: str, s: str, e: str) -> Page:
-        return await self._paginated_days(self._user(uid, "events/workouts"), s, e)
+        # A session is filtered by both its start and its end, so a split boundary has
+        # to overlap by a day or a session crossing it is fetched by neither half.
+        return await self._paginated_days(self._user(uid, "events/workouts"), s, e, pad_days=1)
 
     async def health_scores(
         self,

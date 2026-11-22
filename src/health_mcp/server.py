@@ -137,7 +137,15 @@ async def compose_overview(
         out["missing"].append("openwearables")
     else:
         block = await _call(openwearables, "overview", start_date, end_date)
-        for key in ("weight", "sleep", "activity", "recovery", "workouts", "logging"):
+        for key in (
+            "weight",
+            "sleep",
+            "activity",
+            "recovery",
+            "workouts",
+            "logging",
+            "fetch_truncated",
+        ):
             out[key] = block.get(key)
         for name in block.get("failed_blocks") or []:
             out["missing"].append(f"openwearables.{name}")
@@ -162,7 +170,13 @@ async def compose_checkin(sources: Mapping[str, Source], date: str) -> dict[str,
         out["missing"].append("openwearables")
     else:
         block = await _call(openwearables, "daily", date)
-        for key in ("weight_kg", "sleep_hours", "workout_minutes", "recovery_score"):
+        for key in (
+            "weight_kg",
+            "sleep_hours",
+            "workout_minutes",
+            "recovery_score",
+            "fetch_truncated",
+        ):
             out[key] = block.get(key)
         for name in block.get("failed_blocks") or []:
             out["missing"].append(f"openwearables.{name}")
@@ -200,7 +214,12 @@ async def compose_correlation(
         return sleep
     if "error" in volume:
         return volume
-    return A.sleep_training_corr(sleep, volume, lag_days, {"start": start_date, "end": end_date})
+    out = A.sleep_training_corr(
+        sleep.get("hours") or {}, volume, lag_days, {"start": start_date, "end": end_date}
+    )
+    if sleep.get("fetch_truncated"):
+        out["fetch_truncated"] = {"sleep": True}
+    return out
 
 
 async def compose_profile(

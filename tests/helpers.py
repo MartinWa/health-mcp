@@ -102,6 +102,7 @@ class FakeSource:
         overview: dict[str, Any] | None = None,
         daily: dict[str, Any] | None = None,
         sleep_hours: dict[str, float] | None = None,
+        sleep_truncated: bool = False,
         volume: dict[str, float] | None = None,
         status: dict[str, Any] | None = None,
     ):
@@ -110,6 +111,7 @@ class FakeSource:
         self._overview = overview or {}
         self._daily = daily or {}
         self._sleep_hours = sleep_hours or {}
+        self._sleep_truncated = sleep_truncated
         self._volume = volume or {}
         self._status = status or {"ok": True, "source": name}
         self.refreshed = 0
@@ -134,8 +136,8 @@ class FakeSource:
     async def daily(self, day: str) -> dict[str, Any]:
         return self._daily
 
-    async def sleep_hours_by_date(self, start: str, end: str) -> dict[str, float]:
-        return self._sleep_hours
+    async def sleep_hours_by_date(self, start: str, end: str) -> dict[str, Any]:
+        return {"hours": self._sleep_hours, "fetch_truncated": self._sleep_truncated}
 
     async def volume_by_date(self, start: str, end: str) -> dict[str, float]:
         return self._volume

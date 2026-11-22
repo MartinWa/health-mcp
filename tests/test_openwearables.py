@@ -439,3 +439,164 @@ def test_overview_reports_the_error_of_the_block_that_failed(tmp_path):
     assert out["failed_blocks"] == ["activity"]
     assert out["error"] == "Open Wearables returned 500"
     assert "No data for this period" in out["weight"]["error"]
+
+
+def activity_rows(first_day: int, count: int) -> list[dict]:
+    return [
+        {"date": f"2026-01-{day:02d}", "steps": 1000 * day}
+        for day in range(first_day, first_day + count)
+    ]
+
+
+def sleep_rows(first_day: int, count: int) -> list[dict]:
+    return [
+        {"date": f"2026-01-{day:02d}", "duration_minutes": 420, "efficiency_percent": 90}
+        for day in range(first_day, first_day + count)
+    ]
+
+
+def test_a_cursor_page_still_retries_a_rate_limit(tmp_path):
+    state = {"calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "cursor" not in request.url.params:
+            return httpx.Response(200, json=page(sleep_rows(1, 1), has_more=True, cursor="c1"))
+        state["calls"] += 1
+        if state["calls"] < 3:
+            return httpx.Response(429, json={"detail": "slow down"})
+        return httpx.Response(200, json=page(sleep_rows(2, 1)))
+
+    source, client = make_source(tmp_path, handler)
+
+    async def go():
+        try:
+            return await source.get_sleep_summary("2026-01-01", "2026-01-02")
+        finally:
+            await client.aclose()
+
+    out = run(go())
+    assert state["calls"] == 3
+    assert "error" not in out
+    assert out["fetch_truncated"] is False
+    assert out["points"] == 2
+
+
+def test_an_endpoint_without_a_fallback_keeps_its_5xx_retries(tmp_path):
+    state = {"calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "cursor" not in request.url.params:
+            rows = [{"type": "steps", "timestamp": "2026-01-01T06:00:00Z", "value": 1}]
+            return httpx.Response(200, json=page(rows, has_more=True, cursor="c1"))
+        state["calls"] += 1
+        if state["calls"] == 1:
+            return httpx.Response(500, json={"detail": "boom"})
+        rows = [{"type": "steps", "timestamp": "2026-01-02T06:00:00Z", "value": 2}]
+        return httpx.Response(200, json=page(rows))
+
+    source, client = make_source(tmp_path, handler)
+
+    async def go():
+        try:
+            return await source.get_timeseries(["steps"], "2026-01-01", "2026-01-02", "1day")
+        finally:
+            await client.aclose()
+
+    out = run(go())
+    assert state["calls"] == 2
+    assert "error" not in out
+    assert out["total_points"] == 2
+    assert out["fetch_truncated"] is False
+
+
+def test_a_workout_crossing_a_split_boundary_is_kept_once(tmp_path):
+    crossing = {
+        "start_time": "2026-01-05T23:00:00Z",
+        "end_time": "2026-01-06T01:00:00Z",
+        "type": "ride",
+        "duration_seconds": 7200,
+    }
+    calls = {"windows": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        if "cursor" in params:
+            return httpx.Response(500, json={"detail": "Internal Server Error"})
+        calls["windows"] += 1
+        if calls["windows"] == 1:
+            return httpx.Response(200, json=page([], has_more=True, cursor="c1"))
+        start, end = params["start_date"], params["end_date"]
+        kept = [
+            row
+            for row in [crossing]
+            if start <= row["start_time"][:10] and row["end_time"][:10] <= end
+        ]
+        return httpx.Response(200, json=page(kept))
+
+    source, client = make_source(tmp_path, handler)
+
+    async def go():
+        try:
+            return await source.get_workouts("2026-01-01", "2026-01-10")
+        finally:
+            await client.aclose()
+
+    out = run(go())
+    assert "error" not in out
+    assert out["count"] == 1
+    assert out["fetch_truncated"] is False
+
+
+def test_a_failed_half_keeps_the_rows_the_other_half_recovered(tmp_path):
+    state = {"first": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        if "cursor" in params:
+            return httpx.Response(500, json={"detail": "Internal Server Error"})
+        if state["first"]:
+            state["first"] = False
+            return httpx.Response(200, json=page(activity_rows(1, 1), has_more=True, cursor="c1"))
+        if params["start_date"] == "2026-01-06":
+            return httpx.Response(500, json={"detail": "Internal Server Error"})
+        return httpx.Response(200, json=page(activity_rows(2, 4)))
+
+    source, client = make_source(tmp_path, handler)
+
+    async def go():
+        try:
+            return await source.get_activity_summary("2026-01-01", "2026-01-10")
+        finally:
+            await client.aclose()
+
+    out = run(go())
+    assert out["fetch_truncated"] is True
+    assert out["points"] == 5
+
+
+def test_overview_and_daily_report_a_truncated_block(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("summaries/activity"):
+            if "cursor" in request.url.params:
+                return httpx.Response(500, json={"detail": "Internal Server Error"})
+            return httpx.Response(200, json=page(activity_rows(1, 1), has_more=True, cursor="c1"))
+        if path.endswith("summaries/sleep"):
+            return httpx.Response(200, json=page(sleep_rows(1, 1)))
+        return httpx.Response(200, json=page([]))
+
+    source, client = make_source(tmp_path, handler)
+
+    async def go():
+        try:
+            overview = await source.overview("2026-01-01", "2026-01-01")
+            daily = await source.daily("2026-01-01")
+        finally:
+            await client.aclose()
+        return overview, daily
+
+    overview, daily = run(go())
+    assert overview["fetch_truncated"]["activity"] is True
+    assert overview["fetch_truncated"]["sleep"] is False
+    assert daily["fetch_truncated"]["sleep"] is False
+    assert daily["fetch_truncated"]["weight"] is False
