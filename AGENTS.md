@@ -10,9 +10,10 @@ Instructions for automated agents working in this repository.
 - All health data is personal. Never commit `.env`, data files, caches, tokens,
   real workout/medicine values or fixtures derived from them. Examples and tests
   must be synthetic.
-- The server is read-only: Open Wearables and `strong-data` are read-only APIs,
-  and the profile directory is read-only to this service. Do not add write paths
-  to the sources.
+- The MCP service is read-only: Open Wearables and `strong-data` are read-only APIs,
+  and the profile directory is read-only to this service. Authoring stays a separate
+  host-side path and writes only under `data/profile/`. Do not add write paths to the
+  sources.
 - Dates crossing the tool boundary are `YYYY-MM-DD` and are validated once in
   `health_mcp.utils`. Dates are installation-local calendar dates (`TZ`), never
   UTC-truncated.
@@ -39,6 +40,8 @@ uv run python -m health_mcp.server
 ## Layout
 
 - `src/health_mcp/server.py` — FastMCP server factory, composite tools, lifespan
+- `src/health_mcp/asgi.py` — streamable HTTP entrypoint, bearer middleware, `/healthz`
+- `src/health_mcp/log.py` — JSON log configuration
 - `src/health_mcp/sources/` — one module per source; a source owns its client,
   cache namespace and tools
 - `src/health_mcp/client.py` — Open Wearables API client

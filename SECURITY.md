@@ -1,9 +1,10 @@
 # Security
 
 Health MCP is a read-only aggregation layer over personal health data. It holds no
-database and writes no health records; it reads two read-only APIs, shapes the results
-and caches raw responses on local disk. Run it for a single trusted operator and never
-expose it without the bearer-auth HTTP mode behind TLS.
+database and writes no health records; it reads its configured sources through
+read-only interfaces, shapes the results and caches raw responses on local disk. Run
+it for a single trusted operator and never expose it without the bearer-auth HTTP
+mode behind TLS.
 
 ## Reporting a vulnerability
 
@@ -23,6 +24,8 @@ none of it:
 
 - no real sleep, weight, activity, recovery, workout or lifting values
 - no real wearables elements, medicine values, notes, dates or identifiers
+- no goals, program intent, conditions, injuries, allergies, regimen, doses, symptoms or
+  other `data/profile/` content (`profile.yaml`, `events.csv`)
 - no real names, accounts, e-mail addresses, tokens or token hashes
 - no real API endpoints, hostnames, volume paths, usernames or UIDs
 - no cache directories, profile exports or diagnostics from a live installation
@@ -45,8 +48,9 @@ or a secret value is present (`bash scripts/pii_audit.sh`).
 - The profile directory is read-only to this service and the cache is local. Cache files
   contain raw upstream responses: protect them like the data they came from, and clear
   them with `refresh_cache` or by deleting the directory.
-- The image runs as `1000:100` and makes no egress beyond the two configured APIs; the
-  FastMCP update check and banner are disabled. Pin base images by digest at deploy time.
+- The image runs as `1000:100` and makes no egress beyond the configured source APIs;
+  the FastMCP update check and banner are disabled. Pin base images by digest at
+  deploy time.
 
 ## Self-hosting
 

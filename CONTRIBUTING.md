@@ -10,12 +10,15 @@ issue first.
 
 ## Rules
 
-- The server stays read-only. No write paths to Open Wearables, `strong-data` or the
-  profile directory, and no new outbound calls beyond the configured sources.
+- The MCP service stays read-only: no write paths to Open Wearables, `strong-data` or
+  the profile directory, and no outbound calls beyond the configured sources. Any
+  authoring path (host-side tooling, or a separate editor entrypoint if one is built)
+  writes only under `data/profile/` and is never exposed through the MCP service.
 - Dates crossing the tool boundary are `YYYY-MM-DD` and validated once in
   `health_mcp.utils`; installation-local calendar dates (`TZ`), never UTC-truncated.
-- New behaviour needs a test, tool names and result shapes stay stable, and code stays
-  free of comments unless a change explicitly requires them.
+- New behaviour needs a test, existing tool names and result fields do not change
+  (additive fields are fine), and code stays free of comments unless a change
+  explicitly requires them. Documentation describes what the code does today.
 - Keep fixtures, screenshots and examples wholly synthetic. Never commit personal
   health data, `.env` files, caches or secrets; [SECURITY.md](SECURITY.md) says what
   counts as personal data.

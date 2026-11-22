@@ -19,14 +19,16 @@ designed to run locally (stdio) or as a container behind a reverse proxy
 | [Open Wearables](https://openwearables.io) | sleep, weight, activity, recovery, workouts, health scores, time series | `OW_API_KEY`, `OW_USER_ID`, `OW_BASE_URL` |
 | [strong-data](https://github.com/MartinWa/strong-data) | lifting sessions, sets, volume, records, yearly progress | `STRONG_API_URL`, `STRONG_API_TOKEN` |
 
-Every source is optional: enable it by setting its credentials, or restrict the
-set explicitly with `SOURCES`. With neither configured the server refuses to
-start; with one configured the other's tools are simply not registered and
-composites report it in `missing`. Enabling a source is a new module under
-`sources/` only.
+Every source is optional: enable it by setting its credentials (or, for a
+file-backed source, by providing its files), or restrict the set explicitly with
+`SOURCES`. With no source configured the server refuses to start; with one
+configured the other's tools are simply not registered and composites report it
+in `missing`. Enabling a source is a new module under `sources/` only.
 
-There is no database access and no lifting CSV parsing in the server —
-`strong-data` imports the Strong export, and this server only reads its API.
+Everything the server reads is read-only: the upstream APIs and, when mounted,
+the profile directory. It has no write path to a source or to the profile and no
+database access, and it does no lifting CSV parsing — `strong-data` imports the
+Strong export, and this server only reads its API.
 
 ## Setup
 
@@ -82,10 +84,16 @@ a `resolution` level instead.
 | Composite | `get_overview`, `get_daily_checkin`, `get_sleep_training_correlation` |
 | Any source | `get_status`, `refresh_cache` |
 
-The composite tools need both sources; without one they return the partial
-answer plus `"missing": [...]`. `get_sleep_training_correlation` defaults to
-`lag_days=1` (lifting volume on day D vs sleep on D+1) and always reports `n`,
-`r`, `lag_days`, `definition` and `period`.
+Open Wearables tools need the `OW_*` variables, the lifting tools need
+`STRONG_API_*`, and the composites use both. `get_status` and `refresh_cache` are
+registered whenever the server starts.
+
+`get_overview` and `get_daily_checkin` draw on both sources; without one they
+return the partial answer plus `"missing": [...]`, while
+`get_sleep_training_correlation` returns an error naming the missing source.
+`get_sleep_training_correlation` defaults to `lag_days=1` (lifting volume on day
+D vs sleep on D+1) and always reports `n`, `lag_days`, `definition` and
+`period`; `r` is added once there are at least three overlapping days.
 
 Generate the exact list for a deployment (this is the only sanctioned source for
 the README table and for the ZeroClaw `auto_approve` list):
@@ -93,7 +101,12 @@ the README table and for the ZeroClaw `auto_approve` list):
 ```bash
 uv run python -m health_mcp.tools --names --all-sources
 uv run python -m health_mcp.tools --names --agent health --prefix health__
+uv run python -m health_mcp.tools --names --agent health-coach --prefix health__
 ```
+
+`--agent` selects the `health` or `health-coach` exposure set. Both sets list the
+same tools today; the generated names, not this table, are authoritative as
+detail and coaching tools are added.
 
 ## Container
 
@@ -101,14 +114,15 @@ uv run python -m health_mcp.tools --names --agent health --prefix health__
 docker build -t health-mcp:dev .
 ```
 
-The image runs as `1000:100`, needs `PROFILE_DIR` and `CACHE_DIR` mounts, and
-exposes port 8000. It disables FastMCP's update check and banner
-(`FASTMCP_CHECK_FOR_UPDATES=off`), so the service makes no egress beyond its two
-upstream APIs. The build applies Debian point-release fixes and drops pip and the
-ensurepip wheels, because the server installs and runs through uv alone. Pin the
-base images by digest at deploy time via
-`--build-arg PYTHON_IMAGE=... --build-arg UV_IMAGE=...`. The compose stack,
-Caddy host and AdGuard rewrite live in the `olympus-stacks` repo, not here.
+The image runs as `1000:100`, exposes port 8000, writes only under the
+`CACHE_DIR` mount and treats a `PROFILE_DIR` mount as read-only. It disables
+FastMCP's update check and banner (`FASTMCP_CHECK_FOR_UPDATES=off`), so the
+service makes no egress beyond its configured upstream APIs. The build applies
+Debian point-release fixes and drops pip and the ensurepip wheels, because the
+server installs and runs through uv alone. Pin the base images by digest at
+deploy time via `--build-arg PYTHON_IMAGE=... --build-arg UV_IMAGE=...`. The
+compose stack, reverse-proxy host and DNS rewrite live in a private deployment
+repository, not here.
 
 ## Continuous integration and releases
 
@@ -152,5 +166,5 @@ contributor agreement.
 ## License
 
 PolyForm Noncommercial License 1.0.0 — **source-available, not OSI open
-source**. Noncommercial use is permitted; commercial use is not granted. See
-[LICENSE](LICENSE).
+source**. Noncommercial use is permitted; commercial use needs a separate
+licence. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
