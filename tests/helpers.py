@@ -15,6 +15,7 @@ def make_settings(tmp_path: Any, **overrides: Any) -> Settings:
     base: dict[str, Any] = {
         "_env_file": None,
         "cache_dir": str(tmp_path / "cache"),
+        "profile_dir": str(tmp_path / "profile"),
         "cache_ttl_hours": 24,
         "strong_cache_ttl_hours": 6,
         "tz": "Europe/Stockholm",

@@ -70,3 +70,62 @@ def test_strong_breakdown_computes_share_of_volume():
     out = A.strong_breakdown(payload, "muscle")
     assert out["items"][0]["share_pct"] == 75.0
     assert out["items"][1]["share_pct"] == 25.0
+
+
+def test_schedule_per_day_only_interprets_unambiguous_text():
+    assert A.schedule_per_day("daily") == 1.0
+    assert A.schedule_per_day("Twice daily") == 2.0
+    assert A.schedule_per_day("3x daily") == 3.0
+    assert A.schedule_per_day("weekly") == 1 / 7
+    assert A.schedule_per_day("as needed") is None
+    assert A.schedule_per_day("") is None
+    assert A.schedule_per_day(None) is None
+
+
+def test_medication_adherence_ignores_symptoms_and_unplanned_doses():
+    planned = [
+        {
+            "kind": "medication",
+            "substance": "example-med",
+            "dose": 50,
+            "unit": "µg",
+            "schedule": "daily",
+        },
+        {
+            "kind": "supplement",
+            "substance": "creatine",
+            "dose": 5,
+            "unit": "g",
+            "schedule": "twice daily",
+        },
+    ]
+    doses = [
+        {"date": "2026-11-20", "kind": "medication", "substance": "example-med"},
+        {"date": "2026-11-21", "kind": "medication", "substance": "Example-Med"},
+        {"date": "2026-11-21", "kind": "symptom", "substance": ""},
+        {"date": "2026-11-21", "kind": "supplement", "substance": "creatine"},
+        {"date": "2026-11-21", "kind": "supplement", "substance": "unplanned"},
+    ]
+    out = A.medication_adherence(planned, doses, "2026-11-20", "2026-11-21")
+    assert out["period"] == {"start": "2026-11-20", "end": "2026-11-21", "days": 2}
+    assert out["n"] == 2
+    assert [row["substance"] for row in out["items"]] == ["example-med", "creatine"]
+    medication, supplement = out["items"]
+    assert (medication["expected"], medication["logged"]) == (2.0, 2)
+    assert medication["missing_days"] == 0
+    assert (supplement["expected"], supplement["logged"]) == (4.0, 1)
+    assert supplement["missing_days"] == 1
+    assert out["expected"] == 6.0
+    assert out["logged"] == 3
+    assert out["adherence_pct"] == 50.0
+    assert out["unplanned_logged"] == [{"substance": "unplanned", "logged": 1}]
+    assert "kind medication or supplement" in out["definition"]
+
+
+def test_medication_adherence_without_interpretable_schedules():
+    planned = [{"kind": "medication", "substance": "example-med", "schedule": "as needed"}]
+    out = A.medication_adherence(planned, [], "2026-11-20", "2026-11-21")
+    assert out["n"] == 0
+    assert out["adherence_pct"] is None
+    assert out["unparsed_schedules"][0]["substance"] == "example-med"
+    assert "cannot be computed" in out["interpretation"]

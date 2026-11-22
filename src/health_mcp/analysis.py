@@ -7,6 +7,7 @@ not the server.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
 from typing import Any
@@ -327,6 +328,24 @@ def _items(payload: Any) -> list[dict[str, Any]]:
     return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
 
 
+def _number(value: Any, digits: int = 1) -> float | None:
+    if value is None:
+        return None
+    try:
+        return round(float(value), digits)
+    except (TypeError, ValueError):
+        return None
+
+
+def _downsample(rows: list[Any], max_points: int) -> tuple[list[Any], bool]:
+    total = len(rows)
+    cap = max(1, min(int(max_points), HARD_MAX_POINTS))
+    if total <= cap:
+        return rows, False
+    step = total / cap
+    return [rows[int(index * step)] for index in range(cap)], True
+
+
 def strong_compact(summary: Any, weekly: Any = None) -> dict[str, Any]:
     """A small lifting block for composite overviews."""
     if not isinstance(summary, dict) or "volume_kg" not in summary:
@@ -415,11 +434,7 @@ def strong_series(series: Any, max_points: int) -> dict[str, Any]:
         for item in items
     ]
     total = len(points)
-    cap = max(1, min(int(max_points), HARD_MAX_POINTS))
-    truncated = total > cap
-    if truncated:
-        step = total / cap
-        points = [points[int(index * step)] for index in range(cap)]
+    points, truncated = _downsample(points, max_points)
     return {
         "bucket": (series or {}).get("bucket") if isinstance(series, dict) else None,
         "group_by": (series or {}).get("group_by") if isinstance(series, dict) else None,
@@ -497,4 +512,862 @@ def strong_session_detail(detail: Any) -> dict[str, Any]:
         "duration_min": detail.get("duration_min"),
         "volume_kg": round(float(detail.get("total_volume_kg") or 0), 1),
         "sets": sets,
+    }
+
+
+RECORD_DEFINITIONS = {
+    "est_1rm": (
+        "Best estimated 1RM per exercise, using Epley: weight_kg x (1 + reps/30). "
+        "There is no 12-rep cap, so high-rep sets are extrapolated and are less reliable."
+    ),
+    "bodyweight": (
+        "Best bodyweight set per exercise, ranked by reps. Bodyweight sets have zero "
+        "volume, so they never appear in volume totals; seconds and distance are "
+        "reported when the set has them."
+    ),
+}
+
+
+def _record_rank(row: Mapping[str, Any]) -> tuple[float, ...]:
+    if "est_1rm_kg" in row:
+        return (row.get("est_1rm_kg") or 0.0, row.get("weight_kg") or 0.0)
+    return (row.get("reps") or 0.0, row.get("seconds") or 0.0, row.get("distance") or 0.0)
+
+
+def strong_exercise_detail(
+    progress: Any,
+    records: Any,
+    exercise: str,
+    max_points: int,
+    record_cap: int,
+) -> dict[str, Any]:
+    points = [
+        {
+            "date": item.get("date"),
+            "sets": int(item.get("sets") or 0),
+            "best_est_1rm_kg": _number(item.get("best_est_1rm_kg")),
+            "top_weight_kg": _number(item.get("top_weight_kg")),
+            "max_reps": item.get("max_reps"),
+            "volume_kg": _number(item.get("volume_kg")),
+        }
+        for item in _items(progress)
+    ]
+    total_points = len(points)
+    out: dict[str, Any] = {"exercise": exercise, "total_points": total_points}
+    if not points:
+        out["note"] = "no sets logged for this exercise in the period"
+    else:
+        out["first"] = points[0]
+        out["last"] = points[-1]
+        out["sets"] = sum(point["sets"] for point in points)
+        out["volume_kg"] = round(sum(point["volume_kg"] or 0.0 for point in points), 1)
+        estimated = [point for point in points if point["best_est_1rm_kg"] is not None]
+        if estimated:
+            best = max(estimated, key=lambda point: point["best_est_1rm_kg"] or 0.0)
+            out["best_est_1rm"] = {"kg": best["best_est_1rm_kg"], "date": best["date"]}
+            first = estimated[0]["best_est_1rm_kg"] or 0.0
+            last = estimated[-1]["best_est_1rm_kg"] or 0.0
+            if first > 0:
+                out["change_pct"] = round(100 * (last - first) / first, 1)
+        weighted = [point for point in points if point["top_weight_kg"] is not None]
+        if weighted:
+            heaviest = max(weighted, key=lambda point: point["top_weight_kg"] or 0.0)
+            out["top_weight"] = {"kg": heaviest["top_weight_kg"], "date": heaviest["date"]}
+    capped, truncated = _downsample(points, max_points)
+    out["truncated"] = truncated
+    out["points"] = capped
+    record_rows = [
+        {
+            "reps": item.get("reps"),
+            "set_count": item.get("set_count"),
+            "top_weight_kg": _number(item.get("top_weight_kg")),
+            "best_est_1rm_kg": _number(item.get("best_est_1rm_kg")),
+            "volume_kg": _number(item.get("volume_kg")),
+            "set_time": item.get("set_time"),
+        }
+        for item in _items(records)
+    ]
+    record_rows.sort(key=lambda row: row.get("reps") or 0)
+    out["record_rows"] = len(record_rows)
+    out["records_truncated"] = len(record_rows) > record_cap
+    out["records"] = record_rows[:record_cap]
+    out["record_definition"] = (
+        "Best set per rep count. top_weight_kg is the heaviest weight at that rep count; "
+        "best_est_1rm_kg uses Epley (weight x (1 + reps/30))."
+    )
+    return out
+
+
+def strong_records(payload: Any, kind: str, cap: int) -> dict[str, Any]:
+    if kind == "bodyweight":
+        rows: list[dict[str, Any]] = [
+            {
+                "exercise": item.get("exercise"),
+                "reps": item.get("reps"),
+                "seconds": _number(item.get("seconds")),
+                "distance": _number(item.get("distance")),
+                "set_time": item.get("set_time"),
+            }
+            for item in _items(payload)
+        ]
+    else:
+        rows = [
+            {
+                "exercise": item.get("exercise"),
+                "est_1rm_kg": _number(item.get("est_1rm_kg")),
+                "weight_kg": _number(item.get("weight_kg")),
+                "reps": item.get("reps"),
+                "set_time": item.get("set_time"),
+            }
+            for item in _items(payload)
+        ]
+    rows.sort(key=_record_rank, reverse=True)
+    shown = rows[:cap]
+    return {
+        "kind": kind,
+        "total": len(rows),
+        "returned": len(shown),
+        "truncated": len(rows) > len(shown),
+        "records": shown,
+        "definition": RECORD_DEFINITIONS.get(kind, ""),
+    }
+
+
+def strong_sets(page: Any) -> dict[str, Any]:
+    if not isinstance(page, dict):
+        return {"error": "No lifting sets in this period"}
+    return {
+        "count": page.get("count"),
+        "has_more": bool(page.get("has_more")),
+        "returned": len(_items(page)),
+        "sets": [
+            {
+                "id": item.get("id"),
+                "session_id": item.get("session_id"),
+                "date": item.get("session_date"),
+                "exercise": item.get("exercise"),
+                "muscle": item.get("muscle_group"),
+                "set_order": item.get("set_order"),
+                "weight_kg": _number(item.get("weight_kg")),
+                "reps": item.get("reps"),
+                "rpe": _number(item.get("rpe")),
+                "volume_kg": _number(item.get("volume_kg")),
+                "est_1rm_kg": _number(item.get("est_1rm_kg")),
+            }
+            for item in _items(page)
+        ],
+    }
+
+
+def strong_yearly(yearly: Any, pace: Any, as_of: str) -> dict[str, Any]:
+    totals = [
+        {
+            "year": item.get("year"),
+            "sessions": item.get("sessions"),
+            "sets": item.get("sets"),
+            "volume_kg": _number(item.get("volume_kg")),
+            "volume_t": _number(item.get("volume_t"), 2),
+            "hours": _number(item.get("hours"), 2),
+        }
+        for item in _items(yearly)
+    ]
+    source = pace if isinstance(pace, dict) else {}
+    out: dict[str, Any] = {
+        "year": source.get("year"),
+        "as_of": as_of,
+        "totals_by_year": totals,
+        "pace": [
+            {
+                "year": row.get("year"),
+                "sessions": row.get("sessions"),
+                "volume_kg": _number(row.get("volume_kg")),
+                "cumulative_sessions": row.get("cumulative_sessions"),
+                "cumulative_volume_kg": _number(row.get("cumulative_volume_kg")),
+            }
+            for row in source.get("pace") or []
+            if isinstance(row, dict)
+        ],
+    }
+    for key in ("ytd", "last_year_to_date", "projected", "needed_per_week"):
+        block = source.get(key)
+        out[key] = block if isinstance(block, dict) else None
+    out["pace_definition"] = (
+        "ytd is this year to as_of; last_year_to_date the same window one year back; "
+        "projected is the full-year extrapolation; needed_per_week is what the remainder "
+        "of the year would have to average to match last year's total."
+    )
+    return out
+
+
+def strong_curve(curve: Any, max_points: int) -> dict[str, Any]:
+    rows = [
+        {
+            "year": item.get("year"),
+            "date": item.get("date"),
+            "day_of_year": item.get("day_of_year"),
+            "sessions": item.get("sessions"),
+            "cumulative_sessions": item.get("cumulative_sessions"),
+            "cumulative_volume_kg": _number(item.get("cumulative_volume_kg")),
+        }
+        for item in _items(curve)
+    ]
+    points, truncated = _downsample(rows, max_points)
+    return {
+        "year": curve.get("year") if isinstance(curve, dict) else None,
+        "years": curve.get("years") if isinstance(curve, dict) else None,
+        "total_points": len(rows),
+        "truncated": truncated,
+        "points": points,
+    }
+
+
+# -- profile and events ---------------------------------------------------
+
+
+def schedule_per_day(schedule: str | None) -> float | None:
+    """Interpret a free-text schedule conservatively; unknown text returns None.
+
+    Only patterns whose meaning is unambiguous are accepted. A wrong guess here
+    would produce a fake adherence number, which is worse than no number.
+    """
+    text = " ".join((schedule or "").strip().lower().replace("-", " ").split())
+    if not text:
+        return None
+    if text in {"daily", "every day", "once daily", "1x daily", "1 x daily"}:
+        return 1.0
+    if text in {"twice daily", "2x daily", "2 x daily", "bid"}:
+        return 2.0
+    if text in {"weekly", "once weekly", "1x weekly", "1 x weekly"}:
+        return 1 / 7
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(?:x|times)\s*(?:per\s*)?(?:day|daily)", text)
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def medication_adherence(
+    planned: Sequence[Mapping[str, Any]],
+    doses: Sequence[Mapping[str, Any]],
+    start_date: str,
+    end_date: str,
+) -> dict[str, Any]:
+    start, end = parse_date(start_date), parse_date(end_date)
+    days = (end - start).days + 1
+    counts: dict[str, int] = {}
+    dated: dict[str, set[str]] = {}
+    for row in doses:
+        substance = str(row.get("substance") or "").strip().casefold()
+        if not substance:
+            continue
+        counts[substance] = counts.get(substance, 0) + 1
+        dated.setdefault(substance, set()).add(str(row.get("date") or ""))
+    items: list[dict[str, Any]] = []
+    unparsed: list[dict[str, Any]] = []
+    planned_names: set[str] = set()
+    for plan in planned:
+        substance = str(plan.get("substance") or "").strip()
+        if not substance:
+            continue
+        key = substance.casefold()
+        planned_names.add(key)
+        logged = counts.get(key, 0)
+        per_day = schedule_per_day(plan.get("schedule"))
+        if per_day is None:
+            unparsed.append(
+                {
+                    "substance": substance,
+                    "schedule": plan.get("schedule"),
+                    "logged": logged,
+                    "note": "schedule not interpreted; count it by hand",
+                }
+            )
+            continue
+        expected = per_day * days
+        missing_days = None
+        if per_day >= 1:
+            missing_days = sum(
+                1
+                for offset in range(days)
+                if (start + timedelta(days=offset)).isoformat() not in dated.get(key, set())
+            )
+        items.append(
+            {
+                "substance": substance,
+                "kind": plan.get("kind"),
+                "dose": plan.get("dose"),
+                "unit": plan.get("unit"),
+                "schedule": plan.get("schedule"),
+                "per_day": round(per_day, 3),
+                "expected": round(expected, 1),
+                "logged": logged,
+                "adherence_pct": round(100 * logged / expected, 1) if expected else None,
+                "missing_days": missing_days,
+            }
+        )
+    total_expected = sum(float(item["expected"]) for item in items)
+    total_logged = sum(int(item["logged"]) for item in items)
+    out: dict[str, Any] = {
+        "period": {"start": start_date, "end": end_date, "days": days},
+        "n": len(items),
+        "items": items,
+        "expected": round(total_expected, 1),
+        "logged": total_logged,
+        "adherence_pct": round(100 * total_logged / total_expected, 1) if total_expected else None,
+        "unparsed_schedules": unparsed,
+        "unplanned_logged": [
+            {"substance": substance, "logged": count}
+            for substance, count in sorted(counts.items())
+            if substance not in planned_names
+        ],
+        "definition": (
+            "Planned doses come from profile.yaml regimen (medication/supplement rows); "
+            "logged doses are events.csv rows with kind medication or supplement. "
+            "Symptom and note rows never count as doses."
+        ),
+    }
+    if not items:
+        out["interpretation"] = (
+            "No scheduled substance could be interpreted, so adherence cannot be "
+            "computed; see unparsed_schedules."
+        )
+        return out
+    parts = [
+        f"{out['adherence_pct']}% of planned doses logged over {days} days "
+        f"(expected {out['expected']:g}, logged {total_logged}) for {len(items)} substance(s)"
+    ]
+    missing = sum(int(item["missing_days"] or 0) for item in items)
+    if missing:
+        parts.append(f"{missing} substance-day(s) with no logged dose")
+    if unparsed:
+        parts.append(f"{len(unparsed)} schedule(s) not interpreted")
+    out["interpretation"] = "; ".join(parts) + "."
+    return out
+
+
+# -- coaching inputs (Tier C/D) -------------------------------------------
+
+
+def body_summary(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or not payload:
+        return {"error": "No body data in Open Wearables"}
+    slow = payload.get("slow_changing") or payload.get("static") or {}
+    averaged = payload.get("averaged") or {}
+    latest = payload.get("latest") or {}
+    source = payload.get("source") or {}
+    return {
+        "static": {
+            "weight_kg": _number(slow.get("weight_kg"), 2),
+            "height_cm": _number(slow.get("height_cm"), 1),
+            "body_fat_pct": _number(
+                slow.get("body_fat_percent", slow.get("body_fat_percentage")), 1
+            ),
+            "muscle_mass_kg": _number(slow.get("muscle_mass_kg"), 1),
+            "bmi": _number(slow.get("bmi"), 1),
+            "age": slow.get("age"),
+        },
+        "averaged": {
+            "period_days": averaged.get("period_days"),
+            "period_start": averaged.get("period_start"),
+            "period_end": averaged.get("period_end"),
+            "resting_heart_rate_bpm": averaged.get("resting_heart_rate_bpm"),
+            "avg_hrv_sdnn_ms": _number(averaged.get("avg_hrv_sdnn_ms"), 1),
+            "avg_hrv_rmssd_ms": _number(averaged.get("avg_hrv_rmssd_ms"), 1),
+        },
+        "latest": {
+            "body_temperature_celsius": _number(latest.get("body_temperature_celsius"), 2),
+            "body_temperature_measured_at": latest.get("body_temperature_measured_at"),
+        },
+        "source": {"provider": source.get("provider"), "device_name": source.get("device_name")},
+        "definition": (
+            "static is the most recent value per field; averaged covers "
+            "average_period days; latest only appears when measured inside "
+            "latest_window_hours. Missing values stay null, never invented."
+        ),
+    }
+
+
+def data_sources_summary(
+    sources: Any,
+    connections: Any,
+    counts: Any,
+    *,
+    max_sources: int = 50,
+    max_connections: int = 20,
+) -> dict[str, Any]:
+    items = (sources or {}).get("items")
+    source_items = [row for row in items or [] if isinstance(row, dict)]
+    providers: dict[str, int] = {}
+    rows = []
+    for item in source_items:
+        provider = str(item.get("provider") or "unknown")
+        providers[provider] = providers.get(provider, 0) + 1
+        rows.append(
+            {
+                "provider": provider,
+                "device_name": item.get("device_name"),
+                "device_model": item.get("device_model"),
+                "device_type": item.get("device_type"),
+                "source": item.get("source"),
+                "display_name": item.get("display_name"),
+            }
+        )
+    connection_rows = [row for row in connections or [] if isinstance(row, dict)]
+    connections_out = [
+        {
+            "provider": row.get("provider"),
+            "status": row.get("status"),
+            "last_synced_at": row.get("last_synced_at"),
+            "max_historical_days": row.get("max_historical_days"),
+            "live_sync_mode": row.get("live_sync_mode"),
+            "capabilities": {
+                key: row.get(key)
+                for key in ("rest_pull", "webhook_stream", "webhook_ping", "webhook_callback")
+                if row.get(key) is not None
+            },
+        }
+        for row in connection_rows
+    ]
+    counts = counts if isinstance(counts, dict) else {}
+    series_counts = counts.get("series_type_counts")
+    by_provider = counts.get("by_provider")
+    ordered_series = (
+        sorted(series_counts.items(), key=lambda item: -int(item[1]))[:30]
+        if isinstance(series_counts, dict)
+        else []
+    )
+    return {
+        "sources": {
+            "count": (sources or {}).get("total", len(source_items)),
+            "returned": min(len(rows), max_sources),
+            "truncated": len(rows) > max_sources,
+            "providers": providers,
+            "items": rows[:max_sources],
+        },
+        "connections": {
+            "count": len(connections_out),
+            "returned": min(len(connections_out), max_connections),
+            "truncated": len(connections_out) > max_connections,
+            "items": connections_out[:max_connections],
+        },
+        "counts": {
+            "total_data_points": counts.get("total_data_points"),
+            "total_workouts": counts.get("total_workouts"),
+            "total_sleep_events": counts.get("total_sleep_events"),
+            "series_type_counts": {str(key): int(value) for key, value in ordered_series},
+            "workout_type_counts": counts.get("workout_type_counts") or {},
+            "by_provider": [
+                {
+                    "provider": row.get("provider"),
+                    "data_points": row.get("data_points"),
+                    "workout_count": row.get("workout_count"),
+                    "sleep_count": row.get("sleep_count"),
+                }
+                for row in by_provider or []
+                if isinstance(row, dict)
+            ][:30],
+        },
+        "definition": (
+            "sources are the devices/providers that have written data for this user; "
+            "connections are the live provider links and what they support; counts are "
+            "all-time unless a range was given."
+        ),
+    }
+
+
+def sleep_session_stats(df: pd.DataFrame, tz: str, *, max_sessions: int = 25) -> dict[str, Any]:
+    if df is None or len(df) == 0:
+        return {"count": 0, "note": "no sleep sessions in this period"}
+    err = _need(df, ["start_time", "end_time"])
+    if err:
+        return {"error": err}
+    d: Any = df.copy()
+    d["_day"] = to_local_dates(d["start_time"], tz)
+    if "sleep_duration_seconds" in d.columns:
+        seconds: Any = pd.to_numeric(d["sleep_duration_seconds"], errors="coerce")
+        if "duration_seconds" in d.columns:
+            fallback: Any = pd.to_numeric(d["duration_seconds"], errors="coerce")
+            seconds = seconds.where(seconds.notna(), fallback)
+    else:
+        seconds = pd.to_numeric(d["duration_seconds"], errors="coerce")
+    d["_hours"] = seconds / 3600
+    d["_nap"] = d["is_nap"].fillna(False).astype(bool) if "is_nap" in d.columns else False
+    efficiency: Any = (
+        pd.to_numeric(d["efficiency_percent"], errors="coerce")
+        if "efficiency_percent" in d.columns
+        else pd.Series(dtype="float64")
+    )
+    stages = {
+        key: safe_mean(d[column])
+        for column, key in (
+            ("stages.deep_minutes", "avg_deep_min"),
+            ("stages.rem_minutes", "avg_rem_min"),
+            ("stages.light_minutes", "avg_light_min"),
+            ("stages.awake_minutes", "avg_awake_min"),
+        )
+        if column in d.columns
+    }
+    providers: dict[str, int] = {}
+    if "source.provider" in d.columns:
+        for provider, count in d["source.provider"].value_counts().items():
+            providers[str(provider)] = int(count)
+    ordered: Any = d.sort_values("start_time")
+    shown: Any = ordered.tail(max_sessions)
+    rows = []
+    for _, row in shown.iterrows():
+        entry: dict[str, Any] = {
+            "date": str(row["_day"])[:10],
+            "start": str(row.get("start_time")),
+            "end": str(row.get("end_time")),
+            "hours": round(float(row.get("_hours") or 0), 2),
+            "efficiency_pct": _number(row.get("efficiency_percent"), 1),
+            "is_nap": bool(row.get("_nap")),
+        }
+        if "stages.deep_minutes" in row.index:
+            entry["stages"] = {
+                "deep_min": _number(row.get("stages.deep_minutes"), 0),
+                "rem_min": _number(row.get("stages.rem_minutes"), 0),
+                "light_min": _number(row.get("stages.light_minutes"), 0),
+                "awake_min": _number(row.get("stages.awake_minutes"), 0),
+            }
+        rows.append(entry)
+    main = int((~d["_nap"]).sum())
+    return {
+        "count": len(d),
+        "main_sessions": main,
+        "naps": len(d) - main,
+        "nights": int(d["_day"].nunique()),
+        "total_hours": round(float(d["_hours"].fillna(0).sum()), 2),
+        "avg_hours": round(float(d["_hours"].mean()), 2) if d["_hours"].notna().any() else None,
+        "avg_efficiency_pct": safe_mean(efficiency) if len(efficiency) else None,
+        "stages": stages,
+        "providers": providers,
+        "returned": len(rows),
+        "truncated": len(d) > len(rows),
+        "sessions": rows,
+    }
+
+
+def logging_stats(
+    logged: Mapping[str, Any],
+    start_date: str,
+    end_date: str,
+    *,
+    missing_cap: int = 31,
+) -> dict[str, Any]:
+    start, end = parse_date(start_date), parse_date(end_date)
+    days = [
+        (start + timedelta(days=offset)).isoformat() for offset in range((end - start).days + 1)
+    ]
+    window = set(days)
+    out: dict[str, Any] = {"period": {"start": start_date, "end": end_date, "days": len(days)}}
+    for kind, values in logged.items():
+        present = {str(value)[:10] for value in values or [] if str(value)[:10] in window}
+        missing = [day for day in days if day not in present]
+        current = 0
+        for day in reversed(days):
+            if day not in present:
+                break
+            current += 1
+        best = run = 0
+        for day in days:
+            run = run + 1 if day in present else 0
+            best = max(best, run)
+        out[kind] = {
+            "days_logged": len(present),
+            "pct": round(100 * len(present) / len(days), 1) if days else 0.0,
+            "missing_days": len(missing),
+            "current_streak": current,
+            "best_streak": best,
+            "missing_first": missing[:missing_cap],
+            "missing_truncated": len(missing) > missing_cap,
+        }
+    out["definition"] = (
+        "A day is logged when at least one record exists for it. Streaks are "
+        "consecutive logged calendar days; current counts backwards from the end "
+        "date. A workout streak is days with a workout, not a training block."
+    )
+    return out
+
+
+def workload(
+    series: Any, start_date: str, end_date: str, *, max_weeks: int = 104
+) -> dict[str, Any]:
+    weeks = [
+        {
+            "week_start": item.get("bucket_start"),
+            "volume_kg": round(float(item.get("value") or 0), 1),
+        }
+        for item in _items(series)
+    ]
+    weeks.sort(key=lambda row: str(row["week_start"]))
+    rows = []
+    for index, week in enumerate(weeks):
+        prior = weeks[max(0, index - 4) : index]
+        baseline = (
+            round(sum(row["volume_kg"] for row in prior) / len(prior), 1)
+            if len(prior) >= 4
+            else None
+        )
+        ratio = round(week["volume_kg"] / baseline, 2) if baseline and baseline > 0 else None
+        if ratio is None:
+            flag = "baseline_incomplete"
+        elif ratio > 1.3:
+            flag = "spike"
+        elif ratio < 0.8:
+            flag = "drop"
+        else:
+            flag = "in_range"
+        rows.append(
+            {
+                "week_start": week["week_start"],
+                "volume_kg": week["volume_kg"],
+                "baseline_4w": baseline,
+                "acwr": ratio,
+                "flag": flag,
+            }
+        )
+    shown = [row for row in rows if str(row.get("week_start") or "") >= start_date]
+    current = shown[-1] if shown else None
+    if len(shown) > max_weeks:
+        shown = shown[-max_weeks:]
+    return {
+        "period": {"start": start_date, "end": end_date},
+        "weeks": shown,
+        "truncated": len(shown) == max_weeks and len(rows) > max_weeks,
+        "current": current,
+        "definition": (
+            "ACWR is this week's volume divided by the mean of the previous four "
+            "weeks. Spike > 1.3 and drop < 0.8 are conventional flags, not "
+            "diagnoses; weeks before the period are fetched only to form the "
+            "baseline, and a flag of baseline_incomplete means fewer than four "
+            "prior weeks existed."
+        ),
+    }
+
+
+def readiness_inputs(
+    days: Sequence[Mapping[str, Any]],
+    *,
+    max_days: int = 62,
+) -> dict[str, Any]:
+    rows = list(days)
+    shown = rows[-max_days:]
+    recovery = [row["recovery_score"] for row in rows if row.get("recovery_score") is not None]
+    sleep = [row["sleep_hours"] for row in rows if row.get("sleep_hours") is not None]
+    volume = [
+        row["prior_day_volume_kg"] for row in rows if row.get("prior_day_volume_kg") is not None
+    ]
+    return {
+        "n": len(rows),
+        "averages": {
+            "recovery_score": safe_mean(recovery),
+            "sleep_hours": safe_mean(sleep),
+            "prior_day_volume_kg": safe_mean(volume),
+        },
+        "days": shown,
+        "truncated": len(rows) > len(shown),
+        "definition": (
+            "Inputs only: recovery score, sleep hours and the lifting volume of the "
+            "day before, for each day in the period. No readiness score is "
+            "computed, so these numbers have to be shown when commenting."
+        ),
+    }
+
+
+def weight_goal_progress(
+    points: Sequence[tuple[str, float]],
+    target: float,
+    *,
+    target_source: str,
+    deadline: str | None = None,
+) -> dict[str, Any]:
+    if len(points) < 2:
+        return {"error": "Need at least 2 weight points in the period"}
+    baseline_day, baseline = points[0]
+    current_day, current = points[-1]
+    days = max((parse_date(current_day) - parse_date(baseline_day)).days, 1)
+    rate = (current - baseline) / days * 7
+    remaining = current - target
+    distance = baseline - target
+    progress = None if distance == 0 else round(100 * (baseline - current) / distance, 1)
+    projected = None
+    if rate != 0 and (remaining > 0) == (rate < 0):
+        projected = (
+            parse_date(current_day) + timedelta(days=abs(remaining / rate) * 7)
+        ).isoformat()
+    on_track = bool(projected <= deadline) if deadline and projected else None
+    return {
+        "metric": "weight",
+        "baseline": {"date": baseline_day, "kg": round(baseline, 2)},
+        "current": {"date": current_day, "kg": round(current, 2)},
+        "target_kg": round(target, 2),
+        "target_source": target_source,
+        "remaining_kg": round(remaining, 2),
+        "change_kg": round(current - baseline, 2),
+        "rate_kg_per_week": round(rate, 3),
+        "progress_pct": progress,
+        "deadline": deadline,
+        "projected_date": projected,
+        "on_track": on_track,
+        "definition": (
+            "progress_pct is the share of the baseline-to-target distance already "
+            "covered; projected_date assumes the period's rate continues, which is "
+            "rarely linear."
+        ),
+    }
+
+
+def workout_goal_progress(
+    sessions: int,
+    target: float,
+    *,
+    target_source: str,
+    deadline: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "metric": "workouts",
+        "sessions": sessions,
+        "target": target,
+        "target_source": target_source,
+        "remaining": max(round(target - sessions, 1), 0.0),
+        "progress_pct": round(100 * sessions / target, 1) if target else None,
+        "deadline": deadline,
+        "definition": (
+            "sessions counts every workout in the period; the target comes from the "
+            "profile goal for the workouts metric (or an explicit override)."
+        ),
+    }
+
+
+def medicine_logs(
+    rows: Sequence[Mapping[str, Any]], start_date: str, end_date: str
+) -> dict[str, Any]:
+    doses: dict[tuple[str, str], dict[str, Any]] = {}
+    symptoms: list[dict[str, Any]] = []
+    notes: list[dict[str, Any]] = []
+    for row in rows:
+        kind = str(row.get("kind") or "")
+        if kind in {"medication", "supplement"}:
+            key = (kind, str(row.get("substance") or "").strip())
+            entry = doses.setdefault(
+                key,
+                {
+                    "substance": key[1],
+                    "kind": kind,
+                    "count": 0,
+                    "dose_total": 0.0,
+                    "units": set(),
+                    "dates": set(),
+                    "times": set(),
+                    "reasons": set(),
+                },
+            )
+            entry["count"] += 1
+            try:
+                entry["dose_total"] += float(row.get("dose") or 0)
+            except (TypeError, ValueError):
+                pass
+            if row.get("unit"):
+                entry["units"].add(str(row["unit"]))
+            if row.get("date"):
+                entry["dates"].add(str(row["date"]))
+            if row.get("time"):
+                entry["times"].add(str(row["time"]))
+            if row.get("reason"):
+                entry["reasons"].add(str(row["reason"]))
+        elif kind == "symptom":
+            symptoms.append(
+                {"date": row.get("date"), "time": row.get("time"), "notes": row.get("notes")}
+            )
+        elif kind == "note":
+            notes.append(
+                {"date": row.get("date"), "time": row.get("time"), "notes": row.get("notes")}
+            )
+    dose_rows = [
+        {
+            "substance": entry["substance"],
+            "kind": entry["kind"],
+            "count": entry["count"],
+            "dose_total": round(entry["dose_total"], 2),
+            "units": sorted(entry["units"]),
+            "first_date": min(entry["dates"]) if entry["dates"] else None,
+            "last_date": max(entry["dates"]) if entry["dates"] else None,
+            "days_logged": len(entry["dates"]),
+            "times": sorted(entry["times"])[:10],
+            "reasons": sorted(entry["reasons"]),
+        }
+        for entry in doses.values()
+    ]
+    dose_rows.sort(key=lambda row: (-row["count"], row["substance"]))
+    return {
+        "period": {"start": start_date, "end": end_date},
+        "n": len(rows),
+        "doses": dose_rows[:50],
+        "doses_truncated": len(dose_rows) > 50,
+        "symptoms": symptoms[:20],
+        "symptoms_count": len(symptoms),
+        "notes": notes[:20],
+        "notes_count": len(notes),
+        "definition": (
+            "Only medication and supplement rows count as doses; symptoms and notes "
+            "are listed separately. dose_total sums the recorded doses per substance "
+            "and may mix units when the log did."
+        ),
+    }
+
+
+def medicine_impact(
+    doses: Sequence[Mapping[str, Any]],
+    series: Mapping[str, Mapping[str, float]],
+    start_date: str,
+    end_date: str,
+    *,
+    min_days: int = 3,
+) -> dict[str, Any]:
+    exposed: dict[str, set[str]] = {}
+    for row in doses:
+        substance = str(row.get("substance") or "").strip()
+        day = str(row.get("date") or "")
+        if substance and start_date <= day <= end_date:
+            exposed.setdefault(substance.casefold(), set()).add(day)
+    subjects = []
+    for key in sorted(exposed):
+        days = exposed[key]
+        entry: dict[str, Any] = {"substance": key, "days_with": len(days), "metrics": {}}
+        for metric, values in series.items():
+            paired = {
+                str(day): float(value)
+                for day, value in values.items()
+                if start_date <= str(day) <= end_date and value is not None
+            }
+            with_values = [value for day, value in paired.items() if day in days]
+            without_values = [value for day, value in paired.items() if day not in days]
+            if len(with_values) < min_days or len(without_values) < min_days:
+                entry["metrics"][metric] = {
+                    "n_with": len(with_values),
+                    "n_without": len(without_values),
+                    "status": "insufficient_days",
+                }
+                continue
+            with_mean = round(sum(with_values) / len(with_values), 2)
+            without_mean = round(sum(without_values) / len(without_values), 2)
+            entry["metrics"][metric] = {
+                "n_with": len(with_values),
+                "n_without": len(without_values),
+                "mean_with": with_mean,
+                "mean_without": without_mean,
+                "difference": round(with_mean - without_mean, 2),
+                "status": "compared",
+            }
+        subjects.append(entry)
+    return {
+        "period": {"start": start_date, "end": end_date},
+        "n_substances": len(subjects),
+        "subjects": subjects[:25],
+        "subjects_truncated": len(subjects) > 25,
+        "definition": (
+            "Same-day comparison: mean metric on days with a dose of the substance "
+            "vs days without. At least 3 days on each side, no causality, and a "
+            "dose logged after the measurement still counts for that day."
+        ),
     }

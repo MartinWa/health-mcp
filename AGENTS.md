@@ -12,8 +12,8 @@ Instructions for automated agents working in this repository.
   must be synthetic.
 - The MCP service is read-only: Open Wearables and `strong-data` are read-only APIs,
   and the profile directory is read-only to this service. Authoring stays a separate
-  host-side path and writes only under `data/profile/`. Do not add write paths to the
-  sources.
+  host-side path: `python -m health_mcp.profile` is the only writer, and it writes
+  nothing outside `data/profile/`. Do not add write paths to the sources.
 - Dates crossing the tool boundary are `YYYY-MM-DD` and are validated once in
   `health_mcp.utils`. Dates are installation-local calendar dates (`TZ`), never
   UTC-truncated.
@@ -46,6 +46,8 @@ uv run python -m health_mcp.server
   cache namespace and tools
 - `src/health_mcp/client.py` — Open Wearables API client
 - `src/health_mcp/strong_client.py` — `strong-data` API client
+- `src/health_mcp/profile.py` — profile schema, events.csv reader, host-side CLI
+  (`validate`, `show`, `migrate-medicine`); the only writer under `data/profile/`
 - `src/health_mcp/store.py` — cache primitives (paths, TTL, bounded sweep)
 - `src/health_mcp/analysis.py` — pure shaping/statistics, no I/O
 - `src/health_mcp/utils.py` — date validation, filtering, caps

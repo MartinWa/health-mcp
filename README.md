@@ -16,8 +16,9 @@ designed to run locally (stdio) or as a container behind a reverse proxy
 
 | Source | Data | Access |
 | --- | --- | --- |
-| [Open Wearables](https://openwearables.io) | sleep, weight, activity, recovery, workouts, health scores, time series | `OW_API_KEY`, `OW_USER_ID`, `OW_BASE_URL` |
+| [Open Wearables](https://openwearables.io) | sleep, weight, activity, recovery, workouts, health scores, time series, identity/body data | `OW_API_KEY`, `OW_USER_ID`, `OW_BASE_URL` |
 | [strong-data](https://github.com/MartinWa/strong-data) | lifting sessions, sets, volume, records, yearly progress | `STRONG_API_URL`, `STRONG_API_TOKEN` |
+| Profile files | goals, constraints, regimen, event log | `PROFILE_DIR` (`profile.yaml`, `events.csv`), read-only to the server |
 
 Every source is optional: enable it by setting its credentials (or, for a
 file-backed source, by providing its files), or restrict the set explicitly with
@@ -79,9 +80,10 @@ a `resolution` level instead.
 
 | Source | Tools |
 | --- | --- |
-| Open Wearables | `get_weight_trend`, `get_sleep_summary`, `get_activity_summary`, `get_recovery_summary`, `get_workouts`, `get_health_scores`, `get_timeseries` |
-| `strong-data` | `get_lifting_summary`, `get_lifting_trend`, `get_lifting_breakdown`, `get_lifting_sessions` |
-| Composite | `get_overview`, `get_daily_checkin`, `get_sleep_training_correlation` |
+| Open Wearables | `get_weight_trend`, `get_sleep_summary`, `get_activity_summary`, `get_recovery_summary`, `get_workouts`, `get_health_scores`, `get_timeseries`, `get_body`, `get_data_sources`, `get_sleep_sessions`, `get_consistency` |
+| `strong-data` | `get_lifting_summary`, `get_lifting_trend`, `get_lifting_breakdown`, `get_lifting_sessions`, `get_exercise_detail`, `get_lifting_records`, `get_lifting_sets`, `get_yearly_progress` |
+| Profile files | `get_medicine_logs` |
+| Composite | `get_overview`, `get_daily_checkin`, `get_sleep_training_correlation`, `get_profile`, `get_medication_adherence`, `get_goal_progress`, `get_readiness`, `get_workload`, `get_medicine_impact` |
 | Any source | `get_status`, `refresh_cache` |
 
 Open Wearables tools need the `OW_*` variables, the lifting tools need
@@ -95,6 +97,23 @@ return the partial answer plus `"missing": [...]`, while
 D vs sleep on D+1) and always reports `n`, `lag_days`, `definition` and
 `period`; `r` is added once there are at least three overlapping days.
 
+The lifting detail tools stay opt-in: `get_exercise_detail` returns one exercise's
+progress plus its best sets by rep count, `get_lifting_records` ranks estimated
+1RM (Epley) or bodyweight sets, `get_lifting_sets` returns raw sets capped at 200
+rows, and `get_yearly_progress` takes `year`/`as_of` instead of a date range and
+only fetches the cumulative curve with `include_curve=true`.
+
+The coaching tools (Tier C/D) are stateless wrappers over the same data and say
+what they compute: `get_body` splits latest values from averaged vitals,
+`get_data_sources` merges devices, connections and per-type counts,
+`get_sleep_sessions` summarises sessions and naps (at most 25 rows),
+`get_consistency` reports logging percentages, missing days and streaks,
+`get_medication_adherence` compares the planned regimen with logged doses,
+`get_goal_progress` reads its target from `profile.yaml` (an explicit `target`
+is labelled as an override), `get_readiness` returns per-day inputs and no score,
+`get_workload` flags weekly volume against its 4-week ACWR baseline, and
+`get_medicine_impact` compares same-day metrics — an association, not causality.
+
 Generate the exact list for a deployment (this is the only sanctioned source for
 the README table and for the ZeroClaw `auto_approve` list):
 
@@ -104,9 +123,42 @@ uv run python -m health_mcp.tools --names --agent health --prefix health__
 uv run python -m health_mcp.tools --names --agent health-coach --prefix health__
 ```
 
-`--agent` selects the `health` or `health-coach` exposure set. Both sets list the
-same tools today; the generated names, not this table, are authoritative as
-detail and coaching tools are added.
+`--agent` selects the `health` or `health-coach` exposure set. Tier A, the core
+composites and `get_profile` are on both; Tier B (lifting detail/records) is
+`health` only, and Tier C/D (body, data sources, sleep sessions, consistency,
+medicine, coaching composites) is `health-coach` only. The generated names, not
+this table, are authoritative.
+
+## Profile and event log
+
+Goals, constraints and the regimen have no upstream source, so they are authored
+by hand as files in `PROFILE_DIR` (`data/profile/` locally). The server mounts
+that directory read-only and never writes it; `python -m health_mcp.profile` is
+the only writer, and it writes only there.
+
+```text
+data/profile/
+  profile.yaml   # updated:, plus intent / constraints / regimen / notes sections
+  events.csv     # date,time,kind,substance,dose,unit,reason,notes
+```
+
+Each section carries its own `updated:` so `get_status` can report staleness
+(`oldest_section`). Birth date, sex, gender, height and body composition are
+**not** in the file: Open Wearables owns them, and `get_profile` reads them from
+there instead of asking.
+
+```bash
+uv run python -m health_mcp.profile validate            # dotted field paths, non-zero exit
+uv run python -m health_mcp.profile show                # print the parsed profile
+uv run python -m health_mcp.profile migrate-medicine medicine.csv   # one-way import
+```
+
+If `profile.yaml` is missing or invalid the server still starts: the profile
+tools report `present: false` or `valid: false` plus the error path, `get_status`
+shows the same, and every other tool keeps working. A broken file never loses
+the last valid copy. The MCP instructions carry the profile's `intent` only —
+never `constraints` or `regimen`, which would be re-sent on every unrelated
+question.
 
 ## Container
 

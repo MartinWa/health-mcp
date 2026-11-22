@@ -7,11 +7,14 @@ from health_mcp import sources as registry
 
 
 def test_registry_names_and_exposure():
-    assert registry.NAMES == ("openwearables", "strong")
+    assert registry.NAMES == ("openwearables", "strong", "profile", "events")
     assert registry.get("strong").name == "strong"
-    assert set(registry.exposure()) == set(registry.get("strong").exposure) | set(
-        registry.get("openwearables").exposure
-    )
+    merged: set[str] = set()
+    for spec in registry.MODULES:
+        merged |= set(spec.exposure)
+    assert set(registry.exposure()) == merged
+    assert set(registry.get("profile").exposure) == set()
+    assert registry.get("events").exposure == {"get_medicine_logs": frozenset({"health-coach"})}
     with pytest.raises(ValueError, match="Unknown source"):
         registry.get("hevy")
 
@@ -50,4 +53,9 @@ def test_unknown_source_in_the_allowlist_fails_loudly(tmp_path):
 
 def test_ttls_follow_the_configured_cache_hours(tmp_path):
     settings = both_settings(tmp_path, cache_ttl_hours=12, strong_cache_ttl_hours=3)
-    assert registry.ttls(settings) == {"openwearables": 12, "strong": 3}
+    assert registry.ttls(settings) == {
+        "openwearables": 12,
+        "strong": 3,
+        "profile": 0,
+        "events": 0,
+    }

@@ -218,3 +218,78 @@ def test_status_reports_user_and_latency(tmp_path):
     assert out["ok"] is True
     assert out["user"] == {"id": "user-1", "username": "tester"}
     assert isinstance(out["latency_ms"], int)
+
+
+def test_person_merges_personal_record_and_static_body_data(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/personal-record"):
+            return httpx.Response(
+                200, json={"birth_date": "1990-01-01", "sex": None, "gender": "x"}
+            )
+        if request.url.path.endswith("/summaries/body"):
+            return httpx.Response(
+                200,
+                json={
+                    "static": {
+                        "height_cm": 180.0,
+                        "body_fat_percentage": 18.5,
+                        "muscle_mass_kg": 35.0,
+                        "bmi": 24.1,
+                        "age": 36,
+                    }
+                },
+            )
+        raise AssertionError(request.url.path)
+
+    source, client = make_source(tmp_path, handler)
+
+    async def go():
+        try:
+            return await source.person()
+        finally:
+            await client.aclose()
+
+    out = run(go())
+    assert out["available"] is True
+    assert out["birth_date"] == "1990-01-01"
+    assert out["height_cm"] == 180.0
+    assert out["body_fat_pct"] == 18.5
+    assert out["muscle_mass_kg"] == 35.0
+    assert out["age"] == 36
+    assert out["missing"] == ["sex"]
+    assert "Set sex in Open Wearables" in out["note"]
+
+
+def test_person_reports_an_unavailable_source_without_raising(tmp_path):
+    source, client = make_source(
+        tmp_path,
+        lambda request: httpx.Response(500, json={"detail": "down"}),
+    )
+
+    async def go():
+        try:
+            return await source.person()
+        finally:
+            await client.aclose()
+
+    out = run(go())
+    assert out["available"] is False
+    assert "Open Wearables returned 500" in out["error"]
+    assert "cache_age_hours" in out
+
+
+def test_body_static_reads_the_current_slow_changing_block(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"slow_changing": {"height_cm": 175.5, "body_fat_percent": 18.5}}
+        )
+
+    source, client = make_source(tmp_path, handler)
+
+    async def go():
+        try:
+            return await source._client.body_static("user-1")
+        finally:
+            await client.aclose()
+
+    assert run(go()) == {"height_cm": 175.5, "body_fat_percent": 18.5}
