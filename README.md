@@ -1,3 +1,10 @@
+<p align="center">
+  <a href="https://github.com/MartinWa/health-mcp/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/MartinWa/health-mcp/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/MartinWa/health-mcp/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/MartinWa/health-mcp?label=release"></a>
+  <a href="https://github.com/MartinWa/health-mcp/pkgs/container/health-mcp"><img alt="Container image on GHCR" src="https://img.shields.io/badge/ghcr.io-health--mcp%3Alatest-2496ED?logo=docker&amp;logoColor=white"></a>
+  <a href="LICENSE"><img alt="License: PolyForm Noncommercial 1.0.0" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue"></a>
+</p>
+
 # Health MCP
 
 A small [Model Context Protocol](https://modelcontextprotocol.io) server for
@@ -97,15 +104,33 @@ docker build -t health-mcp:dev .
 The image runs as `1000:100`, needs `PROFILE_DIR` and `CACHE_DIR` mounts, and
 exposes port 8000. It disables FastMCP's update check and banner
 (`FASTMCP_CHECK_FOR_UPDATES=off`), so the service makes no egress beyond its two
-upstream APIs. Pin the base images by digest at deploy time via
+upstream APIs. The build applies Debian point-release fixes and drops pip and the
+ensurepip wheels, because the server installs and runs through uv alone. Pin the
+base images by digest at deploy time via
 `--build-arg PYTHON_IMAGE=... --build-arg UV_IMAGE=...`. The compose stack,
 Caddy host and AdGuard rewrite live in the `olympus-stacks` repo, not here.
 
-`.github/workflows/ci.yml` runs the full check on every push and pull request;
-`publish.yml` builds `linux/amd64` on `main` and tags and pushes
-`ghcr.io/<owner>/health-mcp` with `latest`, `main-<sha>` and semver tags. GHCR
-package visibility is independent of the repository; the NAS pulls with a
-`read:packages` PAT.
+## Continuous integration and releases
+
+`.github/workflows/ci.yml` runs the full check on every push, pull request, weekly
+schedule and manual dispatch: lockfile, lint, formatting, types, tests, the PII audit,
+a dependency audit, workflow linting, plus a production image build whose container is
+started with synthetic configuration to verify the `/healthz` and bearer-auth contract
+and scanned for known vulnerabilities. `dependency-review` blocks new high-severity
+dependencies, zizmor audits the workflows and Scorecard publishes the OpenSSF result.
+
+`main` is protected: squash-only pull requests, resolved review threads and the
+`Checks (Linux)`, `Container (Linux)` and `Dependency review` checks; `X.Y.Z` tags are
+protected against moving or deletion. Dependabot updates the Python, action and Docker
+dependencies, and policy-compliant patch updates merge automatically.
+
+`.github/workflows/release.yml` publishes a release: pushing a bare `X.Y.Z` tag on a
+tested `main` commit builds `linux/amd64` and `linux/arm64`, checks both images,
+publishes the multi-platform index to `ghcr.io/<owner>/health-mcp` as `<version>` and
+`latest`, and attests provenance and a per-platform SBOM before creating the GitHub
+Release. GHCR package visibility is independent of the repository; the first release
+may need the package set to public in its settings, and the `latest` tag only moves for
+the current stable release.
 
 ## Development
 
@@ -119,7 +144,10 @@ bash scripts/check.sh        # all of the above
 ```
 
 `planning/` is private working material and is not tracked. Tests use synthetic
-payloads only; never commit `.env`, caches or real health data.
+payloads only; never commit `.env`, caches or real health data. [SECURITY.md](SECURITY.md)
+says what counts as personal data and how to report a vulnerability privately;
+[CONTRIBUTING.md](CONTRIBUTING.md) covers the rules, the release process and the
+contributor agreement.
 
 ## License
 

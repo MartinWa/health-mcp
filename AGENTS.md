@@ -47,8 +47,15 @@ uv run python -m health_mcp.server
 - `src/health_mcp/analysis.py` — pure shaping/statistics, no I/O
 - `src/health_mcp/utils.py` — date validation, filtering, caps
 - `src/health_mcp/tools.py` — tool-name generator for docs and agent config
+- `tools/` — container, image-audit and release checks used by CI and releases
 - `tests/` — unit tests with synthetic payloads
 - `planning/` — private notes (gitignored)
+
+## Repository policy
+
+`main` only moves through a squash-merged pull request; the required checks are
+`Checks (Linux)`, `Container (Linux)` and `Dependency review`. Never move or delete a
+published `X.Y.Z` tag, and never add a workflow secret or a write path to a source.
 
 ## Definition of done
 

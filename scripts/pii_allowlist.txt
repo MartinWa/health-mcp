@@ -5,3 +5,6 @@
 #
 # Each entry below is deliberately narrow and must stay that way.
 README\.md:.*github\.com/MartinWa/strong-data|public source repo of this project; the owner handle is the intentional public namespace
+README\.md:.*MartinWa/health-mcp|badges for this project; the owner handle is the intentional public namespace
+SECURITY\.md:.*MartinWa/health-mcp|private advisory reporting form for this project; the owner handle is the intentional public namespace
+CLA\.md:.*MartinWa/health-mcp|names the licensor repository; the owner handle is the intentional public namespace
