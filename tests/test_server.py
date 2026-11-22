@@ -102,6 +102,53 @@ def test_overview_composite_merges_sources_and_marks_missing(tmp_path):
     assert ow_only["weight"] == {"start_kg": 80.0}
 
 
+def test_overview_composite_marks_a_failed_block_in_missing(tmp_path):
+    ow = FakeSource(
+        "openwearables",
+        overview={
+            "weight": {"start_kg": 80.0},
+            "activity": {"error": "Open Wearables returned 500"},
+            "failed_blocks": ["activity"],
+            "error": "Open Wearables returned 500",
+        },
+    )
+    out = run(compose_overview({"openwearables": ow}, "2026-01-01", "2026-01-31"))
+    assert out["missing"] == ["openwearables.activity", "strong"]
+    assert out["activity"] == {"error": "Open Wearables returned 500"}
+    assert out["openwearables_error"] == "Open Wearables returned 500"
+    assert out["weight"] == {"start_kg": 80.0}
+
+
+def test_overview_composite_carries_the_truncation_flags():
+    ow = FakeSource(
+        "openwearables",
+        overview={
+            "weight": {"start_kg": 80.0},
+            "activity": {"avg_steps": 9000},
+            "fetch_truncated": {"weight": False, "activity": True},
+        },
+    )
+    out = run(compose_overview({"openwearables": ow}, "2026-01-01", "2026-01-31"))
+    assert out["fetch_truncated"] == {"weight": False, "activity": True}
+    assert out["activity"] == {"avg_steps": 9000}
+
+
+def test_correlation_composite_reports_truncated_sleep():
+    ow = FakeSource(
+        "openwearables",
+        sleep_hours={"2026-01-02": 7.0, "2026-01-04": 8.0, "2026-01-06": 9.0},
+        sleep_truncated=True,
+    )
+    strong = FakeSource(
+        "strong", volume={"2026-01-01": 100.0, "2026-01-03": 300.0, "2026-01-05": 500.0}
+    )
+    out = run(
+        compose_correlation({"openwearables": ow, "strong": strong}, "2026-01-01", "2026-01-06", 1)
+    )
+    assert out["n"] == 3
+    assert out["fetch_truncated"] == {"sleep": True}
+
+
 def test_overview_composite_rejects_a_bad_range():
     out = run(compose_overview({}, "2026-02-01", "2026-01-01"))
     assert "after end_date" in out["error"]
