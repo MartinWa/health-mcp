@@ -188,8 +188,10 @@ there instead of asking.
 `intent.program` takes `name`, and optionally `phase`, `started`,
 `deload_every_weeks` (1–52), `sessions_per_week` (1–14) and `progression` (free
 text). Frequency and progression are authored intent, not something the tools
-compute: `get_consistency` reports the observed rate, and the agent compares it
-with `sessions_per_week`.
+compute: compare `sessions_per_week` with the observed rate from
+`get_lifting_summary.sessions_per_week`. (`get_consistency` counts distinct
+workout **days** per source, so two sessions on one day count once — it answers
+"how regular was I", not "how many sessions per week".)
 
 `events.csv` rows are typed by `kind`:
 
@@ -203,9 +205,13 @@ with `sessions_per_week`.
 | `measurement` | — | a reading the sources do not carry |
 
 `dose` is a number and `unit` a separate string, so `50,µg` is a dose and
-`50 µg` is a row error. One invalid row makes the whole events source report
-`valid: false` (the answers that consume it then refuse), so check
-`get_status.sources.events` after hand-editing the file.
+`50 µg` is a row error. One invalid row makes the whole events source unusable,
+not just that row: `get_status.sources.events` drops to `ok: false` with the
+first message in `error` and the first five in `errors`, and the coaching tools
+that consume the log refuse their answers, returning the same block under
+`events` (which is also where `valid` appears — the per-source status block has
+`ok`, not `valid`). So check `get_status.sources.events.ok` after hand-editing
+the file.
 
 ```bash
 uv run python -m health_mcp.profile validate            # dotted field paths, non-zero exit
