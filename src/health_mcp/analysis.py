@@ -1294,6 +1294,7 @@ def medicine_logs(
     rows: Sequence[Mapping[str, Any]], start_date: str, end_date: str
 ) -> dict[str, Any]:
     doses: dict[tuple[str, str], dict[str, Any]] = {}
+    vaccinations: list[dict[str, Any]] = []
     symptoms: list[dict[str, Any]] = []
     notes: list[dict[str, Any]] = []
     for row in rows:
@@ -1326,6 +1327,17 @@ def medicine_logs(
                 entry["times"].add(str(row["time"]))
             if row.get("reason"):
                 entry["reasons"].add(str(row["reason"]))
+        elif kind == "vaccination":
+            vaccinations.append(
+                {
+                    "date": row.get("date"),
+                    "time": row.get("time"),
+                    "substance": row.get("substance"),
+                    "dose": row.get("dose"),
+                    "unit": row.get("unit"),
+                    "notes": row.get("notes"),
+                }
+            )
         elif kind == "symptom":
             symptoms.append(
                 {"date": row.get("date"), "time": row.get("time"), "notes": row.get("notes")}
@@ -1357,12 +1369,14 @@ def medicine_logs(
         "doses_truncated": len(dose_rows) > 50,
         "symptoms": symptoms[:20],
         "symptoms_count": len(symptoms),
+        "vaccinations": vaccinations[:20],
+        "vaccinations_count": len(vaccinations),
         "notes": notes[:20],
         "notes_count": len(notes),
         "definition": (
-            "Only medication and supplement rows count as doses; symptoms and notes "
-            "are listed separately. dose_total sums the recorded doses per substance "
-            "and may mix units when the log did."
+            "Only medication and supplement rows count as doses and in dose_total; "
+            "vaccinations, symptoms and notes are listed separately. dose_total sums "
+            "the recorded doses per substance and may mix units when the log did."
         ),
     }
 

@@ -120,7 +120,7 @@ class EventsSource:
         }
 
     async def get_medicine_logs(self, start_date: DateStr, end_date: DateStr) -> dict[str, Any]:
-        """Dose/symptom/note summary per substance; symptoms are never counted as doses."""
+        """Dose/symptom/note summary per substance; only dose rows count as doses."""
         try:
             validate_range(start_date, end_date)
         except ValueError as exc:

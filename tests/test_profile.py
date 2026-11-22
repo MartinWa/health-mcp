@@ -150,6 +150,30 @@ def test_regimen_plans_flattens_medications_and_supplements(tmp_path):
     assert P.regimen_plans(None) == []
 
 
+def test_program_carries_frequency_and_progression(tmp_path):
+    text = VALID.replace(
+        "    deload_every_weeks: 5",
+        "    deload_every_weeks: 5\n    sessions_per_week: 2\n    progression: add weight steadily",
+    )
+    profile = P.load(write(tmp_path, "program.yaml", text))
+    assert profile.intent is not None and profile.intent.program is not None
+    assert profile.intent.program.sessions_per_week == 2
+    digest = P.intent_digest(profile.intent)
+    assert "2 sessions/week" in digest
+    assert "add weight steadily" in digest
+
+
+@pytest.mark.parametrize("weeks", [0, 15])
+def test_sessions_per_week_is_bounded(tmp_path, weeks):
+    text = VALID.replace(
+        "    deload_every_weeks: 5",
+        f"    deload_every_weeks: 5\n    sessions_per_week: {weeks}",
+    )
+    profile, errors = P.read(write(tmp_path, "program.yaml", text))
+    assert profile is None
+    assert errors[0].startswith("intent.program.sessions_per_week:")
+
+
 def test_read_events_parses_and_reports_bad_rows(tmp_path):
     path = write(tmp_path, "events.csv", EVENTS + "not-a-date,,symptom,,,,,bad row\n")
     rows, errors = P.read_events(path)
@@ -172,6 +196,19 @@ def test_read_events_rejects_unknown_kinds_and_missing_columns(tmp_path):
     rows, errors = P.read_events(no_columns)
     assert rows == []
     assert "missing column" in errors[0]
+
+
+def test_vaccination_rows_are_valid_events_that_need_a_substance(tmp_path):
+    text = (
+        EVENTS + "2026-11-22,,vaccination,influenza vaccine,1,dose,annual,left deltoid\n"
+        "2026-11-23,,vaccination,,,,annual,no substance\n"
+    )
+    rows, errors = P.read_events(write(tmp_path, "events.csv", text))
+    assert [row["kind"] for row in rows[-1:]] == ["vaccination"]
+    assert rows[-1]["substance"] == "influenza vaccine"
+    assert errors == ["row 7: vaccination rows need a substance"]
+    assert "vaccination" not in P.DOSE_KINDS
+    assert "vaccination" in P.SUBSTANCE_KINDS
 
 
 LEGACY = """Date,Substance,Dosage,Unit,Time
