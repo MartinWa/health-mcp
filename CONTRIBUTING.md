@@ -30,12 +30,26 @@ lives in `tools/`; `scripts/` holds the local checks.
 ## Releases
 
 Tags are bare `X.Y.Z` on a tested `main` commit; `.github/workflows/release.yml` then
-publishes the multi-platform image, its attestations and the GitHub Release. Create one
-from `main` after CI is green:
+publishes the multi-platform image, its attestations and the GitHub Release. Existing
+version tags are never overwritten and re-running the workflow is safe, and pushing a
+tag right after a merge is fine: the workflow waits for the CI run on that commit.
+
+On a clean, committed `main` checkout in PowerShell, create an annotated tag:
+
+```powershell
+./tools/tag_release.ps1 -Version 0.1.0 -WhatIf
+./tools/tag_release.ps1 -Version 0.1.0          # add -Push to publish
+```
+
+The helper refuses a dirty tree or a branch other than `main`, rejects a prefix or a
+prerelease suffix, never overwrites an existing tag and only pushes when given `-Push`;
+pushing the tag is what starts publication. Omitting `-Version` increments the patch
+component of the latest stable tag, and the first release needs an explicit version.
+The equivalent by hand:
 
 ```bash
-git tag 0.2.0
-git push origin 0.2.0
+git tag -a 0.2.0 -m "Release 0.2.0"
+git push --no-follow-tags origin refs/tags/0.2.0
 ```
 
 ## Contributor agreement
