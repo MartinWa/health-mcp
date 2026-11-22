@@ -228,7 +228,11 @@ Files with only the original eight columns keep working.
 In `regimen`, `medications` and `supplements` accept optional `started` and
 `stopped` dates; adherence only expects doses between them, and a row whose
 interval misses the requested period is reported with `expected: 0` and a note
-instead of being counted as fully missed.
+instead of being counted as fully missed. `schedule` is read conservatively:
+`daily`, `weekly`, `Nx daily` and `every N days` are interpreted, and
+`every N weeks` is accepted as the same rate as `every 7N days` — the two are one
+schedule, so write whichever form your data already uses rather than duplicating
+a row.
 
 One invalid row makes the whole events source unusable, not just that row:
 `get_status.sources.events` drops to `ok: false` with the

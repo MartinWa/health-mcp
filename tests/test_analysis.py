@@ -79,6 +79,9 @@ def test_schedule_per_day_only_interprets_unambiguous_text():
     assert A.schedule_per_day("weekly") == 1 / 7
     assert A.schedule_per_day("every 14 days") == 1 / 14
     assert A.schedule_per_day("every 2 weeks") == 1 / 14
+    assert A.schedule_per_day("every 2 weeks") == A.schedule_per_day("every 14 days")
+    assert A.schedule_per_day("every 7 days") == A.schedule_per_day("weekly")
+    assert A.schedule_per_day("every 1 days") == A.schedule_per_day("daily")
     assert A.schedule_per_day("as needed") is None
     assert A.schedule_per_day("") is None
     assert A.schedule_per_day(None) is None
