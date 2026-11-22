@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from health_mcp.utils import (
+    event_days,
     filter_range,
     parse_date,
     to_local_dates,
@@ -88,3 +89,30 @@ def test_truncate_series_respects_hard_cap():
     assert total == 5000
     assert truncated is True
     assert len(capped_dates) == 1000
+
+
+def test_event_days_covers_a_daily_range_clipped_to_the_query():
+    days = event_days("2026-01-01", "2026-01-10", 1, "2026-01-05", "2026-01-07")
+    assert days == ["2026-01-05", "2026-01-06", "2026-01-07"]
+    assert event_days("2026-01-01", "2026-01-10", None, "2025-12-01", "2026-01-02") == [
+        "2026-01-01",
+        "2026-01-02",
+    ]
+
+
+def test_event_days_keeps_the_grid_anchored_to_the_row_start():
+    days = event_days("2026-01-01", "2026-01-29", 7, "2026-01-05", "2026-01-29")
+    assert days == ["2026-01-08", "2026-01-15", "2026-01-22", "2026-01-29"]
+
+
+def test_event_days_is_empty_outside_the_query_and_for_a_bad_date():
+    assert event_days("2026-01-01", None, None, "2026-02-01", "2026-02-28") == []
+    assert event_days("2025-01-01", "2025-01-02", None, "2026-02-01", "2026-02-28") == []
+    assert event_days("not-a-date", None, None, "2026-01-01", "2026-02-28") == []
+
+
+def test_event_days_treats_a_missing_end_as_a_single_day():
+    assert event_days("2026-01-01", None, None, "2026-01-01", "2026-12-31") == ["2026-01-01"]
+    assert event_days("2026-01-01", "2025-12-31", None, "2026-01-01", "2026-12-31") == [
+        "2026-01-01"
+    ]

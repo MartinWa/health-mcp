@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
 
 from .utils import (
     HARD_MAX_POINTS,
+    event_days,
     parse_date,
     safe_mean,
     to_local_dates,
@@ -742,7 +743,25 @@ def schedule_per_day(schedule: str | None) -> float | None:
     match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(?:x|times)\s*(?:per\s*)?(?:day|daily)", text)
     if match:
         return float(match.group(1))
+    match = re.fullmatch(r"every\s+(\d+)\s+days?", text)
+    if match and int(match.group(1)) >= 1:
+        return 1 / int(match.group(1))
+    match = re.fullmatch(r"every\s+(\d+)\s+weeks?", text)
+    if match and int(match.group(1)) >= 1:
+        return 1 / (7 * int(match.group(1)))
     return None
+
+
+def _plan_window(plan: Mapping[str, Any], start: date, end: date) -> set[str]:
+    """The days one regimen row is in force inside the queried range."""
+    low, high = start, end
+    if plan.get("started"):
+        low = max(low, parse_date(str(plan["started"])))
+    if plan.get("stopped"):
+        high = min(high, parse_date(str(plan["stopped"])))
+    if low > high:
+        return set()
+    return {(low + timedelta(days=offset)).isoformat() for offset in range((high - low).days + 1)}
 
 
 def medication_adherence(
@@ -760,9 +779,18 @@ def medication_adherence(
         kind = str(row.get("kind") or "").strip().lower()
         if not substance:
             continue
+        covered = event_days(
+            str(row.get("date") or ""),
+            row.get("end_date"),
+            row.get("every_days"),
+            start_date,
+            end_date,
+        )
+        if not covered:
+            continue
         key = (kind, substance)
-        counts[key] = counts.get(key, 0) + 1
-        dated.setdefault(key, set()).add(str(row.get("date") or ""))
+        counts[key] = counts.get(key, 0) + len(covered)
+        dated.setdefault(key, set()).update(covered)
     # One plan row per substance is the normal case, but morning/evening rows for the
     # same substance are legitimate: group them so a logged dose is counted once.
     groups: dict[tuple[str, str], dict[str, Any]] = {}
@@ -778,9 +806,12 @@ def medication_adherence(
                 "substance": substance,
                 "kind": kind,
                 "per_day": 0.0,
+                "expected": 0.0,
+                "window": set(),
                 "schedules": [],
                 "doses": [],
                 "units": set(),
+                "intervals": [],
                 "unparsed": [],
             },
         )
@@ -788,12 +819,18 @@ def medication_adherence(
             group["doses"].append({"dose": plan.get("dose"), "unit": plan.get("unit")})
         if plan.get("unit"):
             group["units"].add(str(plan["unit"]))
+        interval = {"started": plan.get("started"), "stopped": plan.get("stopped")}
+        if any(interval.values()) and interval not in group["intervals"]:
+            group["intervals"].append(interval)
         per_day = schedule_per_day(plan.get("schedule"))
         if per_day is None:
             group["unparsed"].append(plan.get("schedule"))
             group["schedules"].append(plan.get("schedule"))
             continue
+        window = _plan_window(plan, start, end)
         group["per_day"] += per_day
+        group["expected"] += per_day * len(window)
+        group["window"] |= window
         group["schedules"].append(plan.get("schedule"))
     items: list[dict[str, Any]] = []
     unparsed: list[dict[str, Any]] = []
@@ -818,29 +855,28 @@ def medication_adherence(
                 }
             )
             continue
-        expected = group["per_day"] * days
+        expected = group["expected"]
         missing_days = None
-        if group["per_day"] >= 1:
-            missing_days = sum(
-                1
-                for offset in range(days)
-                if (start + timedelta(days=offset)).isoformat() not in dated.get(key, set())
-            )
-        items.append(
-            {
-                "substance": group["substance"],
-                "kind": group["kind"],
-                "plan_rows": len(group["schedules"]),
-                "schedules": group["schedules"],
-                "doses": group["doses"],
-                "units": sorted(group["units"]),
-                "per_day": round(group["per_day"], 3),
-                "expected": round(expected, 1),
-                "logged": logged,
-                "adherence_pct": round(100 * logged / expected, 1) if expected else None,
-                "missing_days": missing_days,
-            }
-        )
+        if group["per_day"] >= 1 and group["window"]:
+            missing_days = sum(1 for day in group["window"] if day not in dated.get(key, set()))
+        item: dict[str, Any] = {
+            "substance": group["substance"],
+            "kind": group["kind"],
+            "plan_rows": len(group["schedules"]),
+            "schedules": group["schedules"],
+            "doses": group["doses"],
+            "units": sorted(group["units"]),
+            "per_day": round(group["per_day"], 3),
+            "expected": round(expected, 1),
+            "logged": logged,
+            "adherence_pct": round(100 * logged / expected, 1) if expected else None,
+            "missing_days": missing_days,
+        }
+        if group["intervals"]:
+            item["intervals"] = group["intervals"]
+        if not group["window"]:
+            item["note"] = "the planned interval does not overlap this period"
+        items.append(item)
     total_expected = sum(float(item["expected"]) for item in items)
     total_logged = sum(int(item["logged"]) for item in items)
     out: dict[str, Any] = {
@@ -858,10 +894,13 @@ def medication_adherence(
         ],
         "definition": (
             "Planned doses come from profile.yaml regimen (medication/supplement rows), "
-            "grouped by kind and substance so each logged dose is counted once; logged "
-            "doses are events.csv rows with kind medication or supplement. Groups with "
-            "an uninterpreted schedule are listed in unparsed_schedules and excluded "
-            "from the percentage. Symptom and note rows never count as doses."
+            "grouped by kind and substance so each logged dose is counted once; a plan "
+            "row's started/stopped dates bound the days it is expected. Logged doses are "
+            "events.csv rows with kind medication or supplement; a row with end_date and "
+            "every_days covers every day it spans, so one row can stand for a daily "
+            "regimen. Groups with an uninterpreted schedule are listed in "
+            "unparsed_schedules and excluded from the percentage. Symptom and note rows "
+            "never count as doses."
         ),
     }
     if not items:
@@ -1314,15 +1353,21 @@ def medicine_logs(
                     "reasons": set(),
                 },
             )
-            entry["count"] += 1
+            covered = event_days(
+                str(row.get("date") or ""),
+                row.get("end_date"),
+                row.get("every_days"),
+                start_date,
+                end_date,
+            ) or [str(row.get("date") or "")]
+            entry["count"] += len(covered)
+            entry["dates"].update(covered)
             try:
-                entry["dose_total"] += float(row.get("dose") or 0)
+                entry["dose_total"] += float(row.get("dose") or 0) * len(covered)
             except (TypeError, ValueError):
                 pass
             if row.get("unit"):
                 entry["units"].add(str(row["unit"]))
-            if row.get("date"):
-                entry["dates"].add(str(row["date"]))
             if row.get("time"):
                 entry["times"].add(str(row["time"]))
             if row.get("reason"):
@@ -1375,8 +1420,10 @@ def medicine_logs(
         "notes_count": len(notes),
         "definition": (
             "Only medication and supplement rows count as doses and in dose_total; "
-            "vaccinations, symptoms and notes are listed separately. dose_total sums "
-            "the recorded doses per substance and may mix units when the log did."
+            "vaccinations, symptoms and notes are listed separately. A row with "
+            "end_date/every_days covers every day it spans, so count is a number of "
+            "dose-days and dose_total sums dose x dose-days; both may mix units when "
+            "the log did."
         ),
     }
 
@@ -1392,9 +1439,17 @@ def medicine_impact(
     exposed: dict[str, set[str]] = {}
     for row in doses:
         substance = str(row.get("substance") or "").strip()
-        day = str(row.get("date") or "")
-        if substance and start_date <= day <= end_date:
-            exposed.setdefault(substance.casefold(), set()).add(day)
+        if not substance:
+            continue
+        covered = event_days(
+            str(row.get("date") or ""),
+            row.get("end_date"),
+            row.get("every_days"),
+            start_date,
+            end_date,
+        )
+        if covered:
+            exposed.setdefault(substance.casefold(), set()).update(covered)
     subjects = []
     for key in sorted(exposed):
         days = exposed[key]

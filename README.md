@@ -177,7 +177,7 @@ the only writer, and it writes only there.
 ```text
 data/profile/
   profile.yaml   # updated:, plus intent / constraints / regimen / notes sections
-  events.csv     # date,time,kind,substance,dose,unit,reason,notes
+  events.csv     # date,time,kind,substance,dose,unit,reason,notes[,end_date,every_days]
 ```
 
 Each section carries its own `updated:` so `get_status` can report staleness
@@ -204,9 +204,39 @@ workout **days** per source, so two sessions on one day count once — it answer
 | `note` | — | free text, listed separately |
 | `measurement` | — | a reading the sources do not carry |
 
-`dose` is a number and `unit` a separate string, so `50,µg` is a dose and
-`50 µg` is a row error. One invalid row makes the whole events source unusable,
-not just that row: `get_status.sources.events` drops to `ok: false` with the
+`dose` is a number and `unit` a separate string, so `50,µg` is a dose and a dose
+written as `50 µg` is a row error. The last two columns let one row stand for a
+regimen instead of one row per day:
+
+| column | Meaning |
+| --- | --- |
+| `end_date` | the row also covers up to this date, inclusive; empty means the row's own day |
+| `every_days` | with `end_date`: one dose every N days inside that window (1–366). Above 1 it requires `end_date` |
+
+```
+2024-09-05,08:00,medication,example-drug,50,µg,,,2026-09-30,1   # one dose daily, 757 days
+2026-04-06,,medication,example-drug,1,dose,,,2026-09-28,7      # one dose weekly, 26 doses
+```
+
+A row with a window counts as one dose per covered day, not one dose: `count`
+in `get_medicine_logs` becomes a number of dose-days, `dose_total` sums
+dose × dose-days, adherence counts the covered days as logged, and medicine
+impact uses them as exposed days. The grid is anchored to the row's own `date`,
+so querying a window that starts mid-interval never shifts which days count.
+The header is exactly the ten columns listed above; a file missing one of them is
+rejected rather than guessed at.
+
+In `regimen`, `medications` and `supplements` accept optional `started` and
+`stopped` dates; adherence only expects doses between them, and a row whose
+interval misses the requested period is reported with `expected: 0` and a note
+instead of being counted as fully missed. `schedule` is read conservatively:
+`daily`, `weekly`, `Nx daily` and `every N days` are interpreted, and
+`every N weeks` is accepted as the same rate as `every 7N days` — the two are one
+schedule, so write whichever form your data already uses rather than duplicating
+a row.
+
+One invalid row makes the whole events source unusable, not just that row:
+`get_status.sources.events` drops to `ok: false` with the
 first message in `error` and the first five in `errors`, and the coaching tools
 that consume the log refuse their answers, returning the same block under
 `events` (which is also where `valid` appears — the per-source status block has
@@ -216,7 +246,6 @@ the file.
 ```bash
 uv run python -m health_mcp.profile validate            # dotted field paths, non-zero exit
 uv run python -m health_mcp.profile show                # print the parsed profile
-uv run python -m health_mcp.profile migrate-medicine medicine.csv   # one-way import
 ```
 
 If `profile.yaml` is missing or invalid the server still starts: the profile

@@ -8,7 +8,7 @@ Date-only values are used verbatim; timestamps are converted to the local zone
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -108,3 +108,42 @@ def safe_mean(values: Any) -> float | None:
     numeric: Any = pd.to_numeric(series, errors="coerce")
     clean: Any = numeric.dropna()
     return round(float(clean.mean()), 2) if len(clean) else None
+
+
+def event_days(
+    day: str,
+    end_day: str | None,
+    every_days: int | None,
+    start_date: str,
+    end_date: str,
+) -> list[str]:
+    """The local days one event row covers, clipped to the queried range.
+
+    A row with no `end_day` covers its own date. With one, it covers every
+    `every_days`-th day from its first date to `end_day` inclusive, so a daily
+    medication is one row rather than one row per day. The step is anchored to the
+    row's own first date, so clipping the start of the range never shifts the grid.
+    """
+    try:
+        first = parse_date(day)
+    except ValueError:
+        return []
+    last = first
+    if end_day:
+        try:
+            last = max(parse_date(end_day), first)
+        except ValueError:
+            last = first
+    step = max(int(every_days or 1), 1)
+    low, high = parse_date(start_date), parse_date(end_date)
+    stop = min(last, high)
+    if first > high or last < low:
+        return []
+    offset = max((low - first).days, 0)
+    current = first + timedelta(days=offset - offset % step)
+    out: list[str] = []
+    while current <= stop:
+        if current >= low:
+            out.append(current.isoformat())
+        current += timedelta(days=step)
+    return out

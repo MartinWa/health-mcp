@@ -77,6 +77,11 @@ def test_schedule_per_day_only_interprets_unambiguous_text():
     assert A.schedule_per_day("Twice daily") == 2.0
     assert A.schedule_per_day("3x daily") == 3.0
     assert A.schedule_per_day("weekly") == 1 / 7
+    assert A.schedule_per_day("every 14 days") == 1 / 14
+    assert A.schedule_per_day("every 2 weeks") == 1 / 14
+    assert A.schedule_per_day("every 2 weeks") == A.schedule_per_day("every 14 days")
+    assert A.schedule_per_day("every 7 days") == A.schedule_per_day("weekly")
+    assert A.schedule_per_day("every 1 days") == A.schedule_per_day("daily")
     assert A.schedule_per_day("as needed") is None
     assert A.schedule_per_day("") is None
     assert A.schedule_per_day(None) is None
@@ -257,3 +262,105 @@ def test_adherence_mixed_substance_does_not_change_a_scheduled_one():
     assert out["items"][0]["substance"] == "example-med"
     assert out["adherence_pct"] == 100.0
     assert [row["substance"] for row in out["unparsed_schedules"]] == ["creatine"]
+
+
+def test_adherence_counts_covered_days_from_a_range_row():
+    planned = [
+        {"kind": "medication", "substance": "example-med", "schedule": "daily", "dose": 50},
+    ]
+    doses = [
+        {
+            "date": "2026-11-20",
+            "kind": "medication",
+            "substance": "example-med",
+            "dose": 50,
+            "end_date": "2026-11-27",
+            "every_days": 1,
+        }
+    ]
+    out = A.medication_adherence(planned, doses, "2026-11-20", "2026-11-27")
+    item = out["items"][0]
+    assert (item["expected"], item["logged"]) == (8.0, 8)
+    assert item["missing_days"] == 0
+    assert out["adherence_pct"] == 100.0
+
+
+def test_adherence_uses_the_plan_interval_and_reports_days_outside_it():
+    planned = [
+        {
+            "kind": "medication",
+            "substance": "example-med",
+            "schedule": "daily",
+            "started": "2026-11-20",
+            "stopped": "2026-11-21",
+        },
+        {
+            "kind": "medication",
+            "substance": "stopped-long-ago",
+            "schedule": "daily",
+            "started": "2026-01-01",
+            "stopped": "2026-01-31",
+        },
+    ]
+    doses = [
+        {"date": "2026-11-20", "kind": "medication", "substance": "example-med"},
+        {"date": "2026-11-21", "kind": "medication", "substance": "example-med"},
+    ]
+    out = A.medication_adherence(planned, doses, "2026-11-20", "2026-11-24")
+    current, past = out["items"]
+    assert (current["expected"], current["logged"]) == (2.0, 2)
+    assert current["intervals"] == [{"started": "2026-11-20", "stopped": "2026-11-21"}]
+    assert (past["expected"], past["logged"]) == (0.0, 0)
+    assert past["adherence_pct"] is None
+    assert "does not overlap" in past["note"]
+    assert out["expected"] == 2.0
+    assert out["adherence_pct"] == 100.0
+
+
+def test_medicine_logs_counts_dose_days_for_a_range_row():
+    rows = [
+        {
+            "date": "2026-11-20",
+            "kind": "medication",
+            "substance": "example-med",
+            "dose": 50,
+            "unit": "µg",
+            "end_date": "2026-11-27",
+            "every_days": 7,
+        }
+    ]
+    out = A.medicine_logs(rows, "2026-11-20", "2026-11-30")
+    entry = out["doses"][0]
+    assert entry["count"] == 2
+    assert entry["days_logged"] == 2
+    assert entry["dose_total"] == 100.0
+    assert entry["last_date"] == "2026-11-27"
+    assert "dose-days" in out["definition"]
+
+
+def test_medicine_impact_exposure_follows_the_covered_days():
+    doses = [
+        {
+            "date": "2026-11-20",
+            "kind": "medication",
+            "substance": "example-med",
+            "end_date": "2026-11-23",
+            "every_days": 1,
+        }
+    ]
+    series = {
+        "sleep_hours": {
+            "2026-11-20": 7.0,
+            "2026-11-21": 7.5,
+            "2026-11-22": 8.0,
+            "2026-11-23": 6.5,
+            "2026-11-24": 8.5,
+            "2026-11-25": 9.0,
+            "2026-11-26": 7.2,
+        }
+    }
+    out = A.medicine_impact(doses, series, "2026-11-20", "2026-11-26")
+    entry = out["subjects"][0]
+    assert entry["days_with"] == 4
+    assert entry["metrics"]["sleep_hours"]["n_with"] == 4
+    assert entry["metrics"]["sleep_hours"]["n_without"] == 3

@@ -335,3 +335,48 @@ def test_invalid_yaml_date_does_not_prevent_startup(tmp_path):
     block = run(build(tmp_path, settings)["profile"].block())
     assert block["valid"] is False
     assert "YAML value error" in block["error"]
+
+
+def test_a_range_row_is_returned_for_every_period_it_overlaps(tmp_path):
+    text = (
+        "date,time,kind,substance,dose,unit,reason,notes,end_date,every_days\n"
+        "2026-11-01,,medication,example-med,50,µg,,,2026-11-30,7\n"
+        "2026-11-20,,symptom,,,,,knee ache,,\n"
+    )
+    write_events(tmp_path, text)
+    source = build(tmp_path, settings_for(tmp_path))["events"]
+
+    later = run(source.get_medicine_logs("2026-11-25", "2026-11-30"))
+    assert later["events"]["valid"] is True
+    assert later["doses"][0]["count"] == 1
+    assert later["doses"][0]["last_date"] == "2026-11-29"
+
+    earlier = run(source.get_medicine_logs("2026-11-01", "2026-11-07"))
+    assert earlier["doses"][0]["count"] == 1
+    assert earlier["doses"][0]["first_date"] == "2026-11-01"
+
+    outside = run(source.get_medicine_logs("2026-12-01", "2026-12-07"))
+    assert outside["n"] == 0
+
+
+def test_adherence_end_to_end_with_a_plan_interval_and_a_range_row(tmp_path):
+    profile = VALID.replace(
+        "- {substance: example-med, dose: 50, unit: µg, schedule: daily}",
+        "- {substance: example-med, dose: 50, unit: µg, schedule: daily,\n"
+        '       started: "2026-11-18", stopped: "2026-11-22"}',
+    )
+    write_profile(tmp_path, profile)
+    write_events(
+        tmp_path,
+        "date,time,kind,substance,dose,unit,reason,notes,end_date,every_days\n"
+        "2026-11-18,,medication,example-med,50,µg,,,2026-11-22,1\n",
+    )
+    out = run(
+        compose_medication_adherence(
+            build(tmp_path, settings_for(tmp_path)), "2026-11-16", "2026-11-30"
+        )
+    )
+    item = next(row for row in out["items"] if row["substance"] == "example-med")
+    assert (item["expected"], item["logged"]) == (5.0, 5)
+    assert item["missing_days"] == 0
+    assert item["intervals"] == [{"started": "2026-11-18", "stopped": "2026-11-22"}]
