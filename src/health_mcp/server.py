@@ -721,12 +721,12 @@ def main() -> None:
     import sys
 
     settings = Settings()
-    configure_logging(settings.log_level)
     if settings.mcp_transport == "http":
         import uvicorn
 
         from .asgi import create_app
 
+        configure_logging(settings.log_level, stream=sys.stdout)
         log.info(
             "http server",
             extra={
@@ -749,6 +749,7 @@ def main() -> None:
             log_level=None,
         )
         return
+    configure_logging(settings.log_level)
     try:
         server = create_server(settings)
     except RuntimeError as exc:

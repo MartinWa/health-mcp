@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import secrets
+import sys
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -96,7 +97,7 @@ def create_app(
     sources: Mapping[str, Source] | None = None,
     cache: CacheStore | None = None,
 ) -> Any:
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, stream=sys.stdout)
     digests = settings.bearer_digests()
     if not digests:
         raise RuntimeError(

@@ -73,7 +73,9 @@ uv run python -m health_mcp.server
 
 (`uvicorn health_mcp.asgi:app` also works, but `python -m health_mcp.server` is
 the supported entrypoint: JSON logs from the first line, no uvicorn banner or access
-log, and `MCP_HOST`/`MCP_PORT`/`MCP_PATH` honoured.)
+log, and `MCP_HOST`/`MCP_PORT`/`MCP_PATH` honoured. Logs go to **stderr** in stdio
+mode — stdout stays the JSON-RPC stream — and to stdout in HTTP mode, the only mode
+where the stream carries nothing else.)
 
 - `MCP_BEARER_TOKENS` is `name:sha256(token)` pairs, one per consumer; the
   single-consumer `MCP_BEARER_TOKEN` alias is hashed to `default`. HTTP mode
@@ -235,9 +237,12 @@ dependencies, and policy-compliant patch updates merge automatically.
 tested `main` commit builds `linux/amd64` and `linux/arm64`, checks both images,
 publishes the multi-platform index to `ghcr.io/<owner>/health-mcp` as `<version>` and
 `latest`, and attests provenance and a per-platform SBOM before creating the GitHub
-Release. GHCR package visibility is independent of the repository; the first release
-may need the package set to public in its settings, and the `latest` tag only moves for
-the current stable release.
+Release. GHCR package visibility is independent of the repository, and the release job
+ends by verifying that an anonymous client can pull the package. Visibility itself is a
+package setting, not an API call (the packages API has no endpoint for it), so a first
+release whose package GitHub created private needs it flipped once under Packages →
+health-mcp → Package settings. The `latest` tag only moves for the current stable
+release.
 
 The reported version is the tag: the release build passes it as the
 `HEALTH_MCP_VERSION` build arg, and the container check fails if `/healthz` and the

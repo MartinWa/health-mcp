@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from typing import Any
+from typing import Any, TextIO
 
 
 class JsonFormatter(logging.Formatter):
@@ -43,8 +43,10 @@ UVICORN_LOGGERS: dict[str, bool] = {
 }
 
 
-def configure_logging(level: str = "INFO") -> None:
-    handler = logging.StreamHandler(sys.stdout)
+def configure_logging(level: str = "INFO", *, stream: TextIO | None = None) -> None:
+    # stdio is the default transport and stdout carries JSON-RPC, so logs default
+    # to stderr. HTTP mode passes sys.stdout: there the stream is only a log.
+    handler = logging.StreamHandler(stream or sys.stderr)
     handler.setFormatter(JsonFormatter())
     root = logging.getLogger()
     root.handlers = [handler]
@@ -52,6 +54,23 @@ def configure_logging(level: str = "INFO") -> None:
     for name in QUIET_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)
     quiet_uvicorn()
+    adopt_fastmcp_logging()
+
+
+def adopt_fastmcp_logging() -> None:
+    """Let FastMCP's records reach the JSON handler instead of a plain-text one.
+
+    FastMCP installs its own stderr handler when a server starts, which would put
+    `INFO: Starting MCP server ...` next to the JSON lines. With its own logging
+    configuration disabled it adds nothing and its records propagate to the root
+    handler; any handler already present is removed for the same reason.
+    """
+    import fastmcp
+
+    fastmcp.settings.log_enabled = False
+    logger = logging.getLogger("fastmcp")
+    logger.handlers = []
+    logger.propagate = True
 
 
 def quiet_uvicorn() -> None:
