@@ -143,15 +143,15 @@ def dotted_errors(errors: Iterable[Mapping[str, Any]]) -> list[str]:
 
 
 def _yaml_error(target: Path, exc: yaml.YAMLError) -> str:
-    # str(exc) embeds the offending source line; keep the position and problem only.
-    problem = getattr(exc, "problem", None) or "syntax error"
+    # PyYAML's `problem` quotes the source: an undefined alias, an unknown tag or
+    # a scalar. Only the error class and position are safe to return.
+    kind = type(exc).__name__
     mark = getattr(exc, "problem_mark", None)
     if mark is not None:
         return (
-            f"{target}: YAML parse error at line {mark.line + 1}, "
-            f"column {mark.column + 1}: {problem}"
+            f"{target}: YAML parse error ({kind}) at line {mark.line + 1}, column {mark.column + 1}"
         )
-    return f"{target}: YAML parse error: {problem}"
+    return f"{target}: YAML parse error ({kind})"
 
 
 def load(path: str | Path) -> Profile:
@@ -168,6 +168,10 @@ def load(path: str | Path) -> Profile:
         raw = yaml.safe_load(text)
     except yaml.YAMLError as exc:
         raise ProfileError(target, [_yaml_error(target, exc)]) from exc
+    except (ValueError, TypeError, OverflowError) as exc:
+        # safe_load constructs timestamps/numbers itself: `updated: 2026-13-01`
+        # raises ValueError before schema validation. Treat it as a bad value.
+        raise ProfileError(target, [f"{target}: YAML value error"]) from exc
     if not isinstance(raw, dict):
         raise ProfileError(target, [f"{target}: expected a YAML mapping"])
     try:

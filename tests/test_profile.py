@@ -258,8 +258,8 @@ def test_yaml_errors_never_echo_the_source_text(tmp_path):
         P.load(path)
     message = caught.value.errors[0]
     assert "SYNTHETIC_PRIVATE_SENTINEL" not in message
-    assert "YAML parse error at line" in message
-    assert "column" in message
+    assert "YAML parse error" in message
+    assert "at line" in message and "column" in message
     _, errors = P.read(path)
     assert errors and "SYNTHETIC_PRIVATE_SENTINEL" not in errors[0]
 
@@ -317,3 +317,31 @@ def test_migration_refuses_to_rewrite_a_log_with_a_bad_row(tmp_path):
         P.migrate_medicine(legacy, broken)
     assert "refusing to rewrite" in caught.value.errors[0]
     assert broken.read_bytes() == before
+
+
+def test_yaml_alias_error_does_not_echo_the_alias(tmp_path):
+    path = write(tmp_path, "profile.yaml", "updated: *SYNTHETIC_PRIVATE_SENTINEL\n")
+    with pytest.raises(P.ProfileError) as caught:
+        P.load(path)
+    message = caught.value.errors[0]
+    assert "SYNTHETIC_PRIVATE_SENTINEL" not in message
+    assert "ComposerError" in message
+
+
+def test_yaml_unknown_tag_error_does_not_echo_the_tag(tmp_path):
+    path = write(tmp_path, "profile.yaml", "updated: !SYNTHETIC_PRIVATE_SENTINEL 2026-11-20\n")
+    with pytest.raises(P.ProfileError) as caught:
+        P.load(path)
+    message = caught.value.errors[0]
+    assert "SYNTHETIC_PRIVATE_SENTINEL" not in message
+    assert "ConstructorError" in message
+
+
+def test_yaml_invalid_date_is_a_sanitized_value_error(tmp_path):
+    path = write(tmp_path, "profile.yaml", "updated: 2026-13-01\n")
+    with pytest.raises(P.ProfileError) as caught:
+        P.load(path)
+    assert caught.value.errors[0] == f"{path}: YAML value error"
+    profile, errors = P.read(path)
+    assert profile is None
+    assert errors == [f"{path}: YAML value error"]

@@ -215,3 +215,45 @@ def test_workload_keeps_full_week_flags_for_a_complete_monday_to_sunday_range():
     out = A.workload(series, "2026-11-02", "2026-11-08")
     assert out["weeks"][0]["complete"] is True
     assert out["weeks"][0]["flag"] == "spike"
+
+
+def test_adherence_excludes_a_mixed_scheduled_and_as_needed_substance():
+    planned = [
+        {"kind": "medication", "substance": "example-med", "schedule": "daily"},
+        {"kind": "medication", "substance": "example-med", "schedule": "as needed"},
+    ]
+    doses = [
+        {"date": "2026-11-01", "kind": "medication", "substance": "example-med"},
+        {"date": "2026-11-01", "kind": "medication", "substance": "example-med"},
+        {"date": "2026-11-02", "kind": "medication", "substance": "example-med"},
+        {"date": "2026-11-02", "kind": "medication", "substance": "example-med"},
+    ]
+    out = A.medication_adherence(planned, doses, "2026-11-01", "2026-11-02")
+    assert out["n"] == 0
+    assert out["adherence_pct"] is None
+    assert len(out["unparsed_schedules"]) == 1
+    entry = out["unparsed_schedules"][0]
+    assert entry["substance"] == "example-med"
+    assert entry["scheduled_per_day"] == 1.0
+    assert entry["expected_scheduled"] == 2.0
+    assert entry["logged"] == 4
+    assert "no percentage" in entry["note"]
+    assert "cannot be computed" in out["interpretation"]
+
+
+def test_adherence_mixed_substance_does_not_change_a_scheduled_one():
+    planned = [
+        {"kind": "medication", "substance": "example-med", "schedule": "daily"},
+        {"kind": "supplement", "substance": "creatine", "schedule": "daily"},
+        {"kind": "supplement", "substance": "creatine", "schedule": "as needed"},
+    ]
+    doses = [
+        {"date": "2026-11-01", "kind": "medication", "substance": "example-med"},
+        {"date": "2026-11-02", "kind": "medication", "substance": "example-med"},
+        {"date": "2026-11-01", "kind": "supplement", "substance": "creatine"},
+    ]
+    out = A.medication_adherence(planned, doses, "2026-11-01", "2026-11-02")
+    assert out["n"] == 1
+    assert out["items"][0]["substance"] == "example-med"
+    assert out["adherence_pct"] == 100.0
+    assert [row["substance"] for row in out["unparsed_schedules"]] == ["creatine"]

@@ -800,14 +800,21 @@ def medication_adherence(
     planned_keys: set[tuple[str, str]] = set(groups)
     for key, group in groups.items():
         logged = counts.get(key, 0)
-        if group["per_day"] <= 0:
+        if group["unparsed"]:
+            # A dose cannot be attributed to the scheduled row or the as-needed row,
+            # so a mixed group has no honest percentage: report it, exclude it.
             unparsed.append(
                 {
                     "substance": group["substance"],
                     "kind": group["kind"],
-                    "schedules": group["unparsed"],
+                    "schedules": group["schedules"],
+                    "scheduled_per_day": round(group["per_day"], 3),
+                    "expected_scheduled": round(group["per_day"] * days, 1),
                     "logged": logged,
-                    "note": "schedule not interpreted; count it by hand",
+                    "note": (
+                        "at least one schedule was not interpreted, so logged doses "
+                        "cannot be attributed to scheduled rows; no percentage computed"
+                    ),
                 }
             )
             continue
@@ -852,8 +859,9 @@ def medication_adherence(
         "definition": (
             "Planned doses come from profile.yaml regimen (medication/supplement rows), "
             "grouped by kind and substance so each logged dose is counted once; logged "
-            "doses are events.csv rows with kind medication or supplement. Symptom and "
-            "note rows never count as doses."
+            "doses are events.csv rows with kind medication or supplement. Groups with "
+            "an uninterpreted schedule are listed in unparsed_schedules and excluded "
+            "from the percentage. Symptom and note rows never count as doses."
         ),
     }
     if not items:

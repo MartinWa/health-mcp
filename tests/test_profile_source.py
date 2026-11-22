@@ -326,3 +326,12 @@ def test_status_never_echoes_profile_content(tmp_path):
     assert "SYNTHETIC_PRIVATE_SENTINEL" not in json.dumps(out)
     block = run(sources["profile"].block())
     assert "SYNTHETIC_PRIVATE_SENTINEL" not in json.dumps(block)
+
+
+def test_invalid_yaml_date_does_not_prevent_startup(tmp_path):
+    write_profile(tmp_path, "updated: 2026-13-01\n")
+    settings = settings_for(tmp_path)
+    create_server(settings)
+    block = run(build(tmp_path, settings)["profile"].block())
+    assert block["valid"] is False
+    assert "YAML value error" in block["error"]
