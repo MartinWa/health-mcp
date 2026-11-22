@@ -3,7 +3,14 @@ ARG PYTHON_IMAGE=python:3.13-slim
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.13.7
 
 FROM ${UV_IMAGE} AS uv
-FROM ${PYTHON_IMAGE} AS runtime
+FROM ${PYTHON_IMAGE} AS python-base
+
+# Apply Debian point-release fixes to the inherited packages before building.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+FROM python-base AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -24,6 +31,11 @@ COPY src ./src
 RUN uv sync --frozen --no-dev --no-editable \
     && mkdir -p /app/data/cache \
     && chown -R 1000:100 /app
+
+# The server installs and runs through uv only, so pip and the ensurepip bundled
+# wheels are dropped rather than shipped with their vendored dependencies.
+RUN /usr/local/bin/python -m pip uninstall --yes pip \
+    && /usr/local/bin/python -c "import ensurepip, pathlib, shutil; shutil.rmtree(pathlib.Path(ensurepip.__file__).parent / '_bundled')"
 
 USER 1000:100
 EXPOSE 8000

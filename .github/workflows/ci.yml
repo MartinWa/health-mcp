@@ -88,6 +88,7 @@ jobs:
           target: runtime
           load: true
           push: false
+          pull: true
           provenance: false
           tags: health-mcp:ci
           no-cache: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}

@@ -84,6 +84,7 @@ jobs:
           context: .
           target: runtime
           platforms: linux/amd64
+          pull: true
           provenance: false
           outputs: type=image,name=${{ steps.release.outputs.image }},push-by-digest=true,name-canonical=true,push=true
           labels: |
@@ -99,6 +100,7 @@ jobs:
           context: .
           target: runtime
           platforms: linux/arm64
+          pull: true
           provenance: false
           outputs: type=image,name=${{ steps.release.outputs.image }},push-by-digest=true,name-canonical=true,push=true
           labels: |

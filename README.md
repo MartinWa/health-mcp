@@ -104,7 +104,9 @@ docker build -t health-mcp:dev .
 The image runs as `1000:100`, needs `PROFILE_DIR` and `CACHE_DIR` mounts, and
 exposes port 8000. It disables FastMCP's update check and banner
 (`FASTMCP_CHECK_FOR_UPDATES=off`), so the service makes no egress beyond its two
-upstream APIs. Pin the base images by digest at deploy time via
+upstream APIs. The build applies Debian point-release fixes and drops pip and the
+ensurepip wheels, because the server installs and runs through uv alone. Pin the
+base images by digest at deploy time via
 `--build-arg PYTHON_IMAGE=... --build-arg UV_IMAGE=...`. The compose stack,
 Caddy host and AdGuard rewrite live in the `olympus-stacks` repo, not here.
 
