@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import date
 from pathlib import Path
 
@@ -36,7 +35,7 @@ regimen:
 notes: "synthetic fixture, not personal data"
 """
 
-EVENTS = """date,time,kind,substance,dose,unit,reason,notes
+EVENTS = """date,time,kind,substance,dose,unit,reason,notes,end_date,every_days
 2026-11-20,08:00,medication,example-med,50,µg,daily,
 2026-11-20,08:00,supplement,creatine,5,g,daily,
 2026-11-21,21:10,symptom,,,,,knee ache after squats
@@ -211,43 +210,7 @@ def test_vaccination_rows_are_valid_events_that_need_a_substance(tmp_path):
     assert "vaccination" in P.SUBSTANCE_KINDS
 
 
-LEGACY = """Date,Substance,Dosage,Unit,Time
-2026-11-19,example-med,50,µg,08:00
-2026-11-20,example-med,50,µg,08:00
-"""
-
-
-def test_migrate_medicine_imports_once_and_keeps_existing_rows(tmp_path):
-    events_path = write(tmp_path, "events.csv", EVENTS)
-    legacy = write(tmp_path, "medicine.csv", LEGACY)
-    first = P.migrate_medicine(legacy, events_path)
-    assert first["imported"] == 2
-    assert first["errors"] == []
-    rows, _ = P.read_events(events_path)
-    assert len(rows) == 6
-    assert [row["kind"] for row in rows if row["date"] == "2026-11-19"] == ["medication"]
-    assert any(path.name.startswith("events.csv.bak-") for path in tmp_path.iterdir())
-    second = P.migrate_medicine(legacy, events_path)
-    assert second["imported"] == 0
-    assert second["skipped"] == 2
-
-
-def test_migrate_medicine_dry_run_writes_nothing(tmp_path):
-    events_path = tmp_path / "events.csv"
-    legacy = write(tmp_path, "medicine.csv", LEGACY)
-    out = P.migrate_medicine(legacy, events_path, dry_run=True)
-    assert out["imported"] == 2
-    assert out["dry_run"] is True
-    assert not events_path.exists()
-
-
-def test_migrate_medicine_requires_the_legacy_columns(tmp_path):
-    legacy = write(tmp_path, "medicine.csv", "Date,Amount\n2026-11-19,50\n")
-    with pytest.raises(P.ProfileError, match="missing column"):
-        P.migrate_medicine(legacy, tmp_path / "events.csv")
-
-
-def test_cli_validate_show_and_migrate(tmp_path, capsys, monkeypatch):
+def test_cli_validate_and_show(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("PROFILE_DIR", str(tmp_path))
     path = write(tmp_path, "profile.yaml", VALID)
     assert P.main(["--profile", str(path), "validate"]) == 0
@@ -261,36 +224,11 @@ def test_cli_validate_show_and_migrate(tmp_path, capsys, monkeypatch):
     shown = yaml.safe_load(capsys.readouterr().out)
     assert shown["intent"]["program"]["phase"] == "hypertrophy"
 
-    events_path = tmp_path / "events.csv"
-    legacy = write(tmp_path, "medicine.csv", LEGACY)
-    code = P.main(
-        [
-            "--events",
-            str(events_path),
-            "migrate-medicine",
-            str(legacy),
-        ]
-    )
-    assert code == 0
-    result = json.loads(capsys.readouterr().out)
-    assert result["imported"] == 2
-    assert result["events"] == str(events_path)
-
 
 def test_cli_validate_defaults_to_the_argument_path(tmp_path, capsys):
     path = write(tmp_path, "profile.yaml", VALID)
     assert P.main(["validate", str(path)]) == 0
     assert str(path) in capsys.readouterr().out
-
-
-def test_cli_refuses_to_write_outside_the_profile_directory(tmp_path, capsys, monkeypatch):
-    monkeypatch.setenv("PROFILE_DIR", str(tmp_path / "profile"))
-    legacy = write(tmp_path, "medicine.csv", LEGACY)
-    outside = tmp_path / "outside" / "events.csv"
-    code = P.main(["--events", str(outside), "migrate-medicine", str(legacy)])
-    assert code == 2
-    assert "refusing to write outside" in capsys.readouterr().err
-    assert not outside.exists()
 
 
 def test_yaml_errors_never_echo_the_source_text(tmp_path):
@@ -327,38 +265,13 @@ def test_non_utf8_events_are_reported_not_raised(tmp_path):
 
 def test_event_row_errors_do_not_echo_values(tmp_path):
     text = (
-        "date,time,kind,substance,dose,unit,reason,notes\n"
+        "date,time,kind,substance,dose,unit,reason,notes,end_date,every_days\n"
         "2026-13-01,08:00,medication,SYNTHETIC_PRIVATE_SENTINEL,50,µg,daily,\n"
     )
     rows, errors = P.read_events(write(tmp_path, "events.csv", text))
     assert rows == []
     assert "SYNTHETIC_PRIVATE_SENTINEL" not in errors[0]
     assert errors[0].startswith("row 2: date is not")
-
-
-def test_migration_refuses_to_rewrite_an_unreadable_destination(tmp_path):
-    broken = write(tmp_path, "events.csv", "date,time,kind,substance,dosage,unit,reason,notes\n")
-    before = broken.read_bytes()
-    legacy = write(tmp_path, "medicine.csv", LEGACY)
-    with pytest.raises(P.ProfileError) as caught:
-        P.migrate_medicine(legacy, broken)
-    assert "refusing to rewrite" in caught.value.errors[0]
-    assert broken.read_bytes() == before
-    assert not list(tmp_path.glob("events.csv.bak-*"))
-
-
-def test_migration_refuses_to_rewrite_a_log_with_a_bad_row(tmp_path):
-    broken = write(
-        tmp_path,
-        "events.csv",
-        "date,time,kind,substance,dose,unit,reason,notes\nnot-a-date,,symptom,,,,,x\n",
-    )
-    before = broken.read_bytes()
-    legacy = write(tmp_path, "medicine.csv", LEGACY)
-    with pytest.raises(P.ProfileError) as caught:
-        P.migrate_medicine(legacy, broken)
-    assert "refusing to rewrite" in caught.value.errors[0]
-    assert broken.read_bytes() == before
 
 
 def test_yaml_alias_error_does_not_echo_the_alias(tmp_path):
@@ -425,11 +338,13 @@ def test_optional_range_columns_are_validated(tmp_path):
     assert errors == ["row 2: every_days must be 1-366"]
 
 
-def test_the_original_eight_columns_still_work(tmp_path):
-    rows, errors = P.read_events(write(tmp_path, "legacy.csv", EVENTS))
-    assert errors == []
-    assert len(rows) == 4
-    assert rows[0].get("end_date", "") == ""
+def test_a_file_without_the_range_columns_is_rejected(tmp_path):
+    header = "date,time,kind,substance,dose,unit,reason,notes"
+    text = header + "\n2026-11-20,,note,,,,,x\n"
+    path = write(tmp_path, "short.csv", text)
+    rows, errors = P.read_events(path)
+    assert rows == []
+    assert errors == [f"{path}: missing column(s) end_date, every_days"]
 
 
 def test_write_events_keeps_the_range_columns(tmp_path):

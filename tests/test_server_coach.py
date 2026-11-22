@@ -33,7 +33,7 @@ regimen:
     - {substance: example-med, dose: 50, unit: µg, schedule: daily}
 """
 
-EVENTS = """date,time,kind,substance,dose,unit,reason,notes
+EVENTS = """date,time,kind,substance,dose,unit,reason,notes,end_date,every_days
 2026-11-01,08:00,medication,example-med,50,µg,daily,
 2026-11-02,08:00,medication,example-med,50,µg,daily,
 2026-11-03,08:00,medication,example-med,50,µg,daily,
@@ -410,7 +410,7 @@ def test_medicine_impact_compares_events_and_daily_metrics(tmp_path):
 
 
 def test_medicine_impact_without_logged_doses_says_so(tmp_path):
-    header = "date,time,kind,substance,dose,unit,reason,notes\n"
+    header = "date,time,kind,substance,dose,unit,reason,notes,end_date,every_days\n"
     settings = profile_settings(tmp_path, events_text=header)
     sources = build(tmp_path, settings)
     out = run(compose_medicine_impact(sources, "2026-11-01", "2026-11-06"))

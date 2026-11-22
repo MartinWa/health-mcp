@@ -205,7 +205,7 @@ workout **days** per source, so two sessions on one day count once — it answer
 | `measurement` | — | a reading the sources do not carry |
 
 `dose` is a number and `unit` a separate string, so `50,µg` is a dose and a dose
-written as `50 µg` is a row error. Two optional columns let one row stand for a
+written as `50 µg` is a row error. The last two columns let one row stand for a
 regimen instead of one row per day:
 
 | column | Meaning |
@@ -223,7 +223,8 @@ in `get_medicine_logs` becomes a number of dose-days, `dose_total` sums
 dose × dose-days, adherence counts the covered days as logged, and medicine
 impact uses them as exposed days. The grid is anchored to the row's own `date`,
 so querying a window that starts mid-interval never shifts which days count.
-Files with only the original eight columns keep working.
+The header is exactly the ten columns listed above; a file missing one of them is
+rejected rather than guessed at.
 
 In `regimen`, `medications` and `supplements` accept optional `started` and
 `stopped` dates; adherence only expects doses between them, and a row whose
@@ -245,7 +246,6 @@ the file.
 ```bash
 uv run python -m health_mcp.profile validate            # dotted field paths, non-zero exit
 uv run python -m health_mcp.profile show                # print the parsed profile
-uv run python -m health_mcp.profile migrate-medicine medicine.csv   # one-way import
 ```
 
 If `profile.yaml` is missing or invalid the server still starts: the profile

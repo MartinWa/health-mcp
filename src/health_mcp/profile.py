@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import os
 import sys
 from collections.abc import Iterable, Mapping, Sequence
@@ -26,13 +25,22 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 BACKUP_KEEP = 10
-EVENT_COLUMNS = ("date", "time", "kind", "substance", "dose", "unit", "reason", "notes")
-EVENT_OPTIONAL_COLUMNS = ("end_date", "every_days")
+EVENT_COLUMNS = (
+    "date",
+    "time",
+    "kind",
+    "substance",
+    "dose",
+    "unit",
+    "reason",
+    "notes",
+    "end_date",
+    "every_days",
+)
 EVENT_KINDS = ("medication", "supplement", "vaccination", "symptom", "note", "measurement")
 DOSE_KINDS = frozenset({"medication", "supplement"})
 SUBSTANCE_KINDS = DOSE_KINDS | {"vaccination"}
 MAX_EVERY_DAYS = 366
-LEGACY_MEDICINE_COLUMNS = ("date", "substance", "dosage", "unit", "time")
 SECTIONS = ("intent", "constraints", "regimen")
 
 
@@ -375,10 +383,7 @@ def _read_event_rows(target: Path, handle: Any) -> tuple[list[dict[str, Any]], l
     if missing:
         return [], [f"{target}: missing column(s) {', '.join(missing)}"]
     for number, raw in enumerate(reader, start=2):
-        row = {
-            name: (raw.get(name) or "").strip()
-            for name in (*EVENT_COLUMNS, *EVENT_OPTIONAL_COLUMNS)
-        }
+        row = {name: (raw.get(name) or "").strip() for name in EVENT_COLUMNS}
         if not any(row.values()):
             continue
         problem = _validate_event(row, number)
@@ -437,14 +442,13 @@ def write_events(path: str | Path, rows: Iterable[Mapping[str, Any]]) -> Path:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     backup(target)
-    columns = (*EVENT_COLUMNS, *EVENT_OPTIONAL_COLUMNS)
     ordered = sorted(rows, key=lambda row: (str(row.get("date") or ""), str(row.get("time") or "")))
     temporary = target.with_suffix(target.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(columns), extrasaction="ignore")
+        writer = csv.DictWriter(handle, fieldnames=list(EVENT_COLUMNS), extrasaction="ignore")
         writer.writeheader()
         for row in ordered:
-            writer.writerow({name: _cell(row.get(name)) for name in columns})
+            writer.writerow({name: _cell(row.get(name)) for name in EVENT_COLUMNS})
     os.replace(temporary, target)
     return target
 
@@ -457,80 +461,6 @@ def _cell(value: Any) -> str:
     return str(value)
 
 
-def _event_key(row: Mapping[str, Any]) -> tuple[str, ...]:
-    return tuple(_cell(row.get(name)) for name in (*EVENT_COLUMNS, *EVENT_OPTIONAL_COLUMNS))
-
-
-def _read_legacy_medicine(source: Path) -> tuple[list[dict[str, Any]], list[str]]:
-    try:
-        with source.open(encoding="utf-8-sig", newline="") as handle:
-            return _parse_legacy_medicine(source, handle)
-    except FileNotFoundError as exc:
-        raise ProfileError(source, [f"{source}: file not found"]) from exc
-    except UnicodeDecodeError as exc:
-        raise ProfileError(source, [f"{source}: not valid UTF-8 (byte {exc.start})"]) from exc
-    except csv.Error as exc:
-        raise ProfileError(source, [f"{source}: CSV parse error: {exc}"]) from exc
-    except OSError as exc:
-        raise ProfileError(source, [f"{source}: {exc}"]) from exc
-
-
-def _parse_legacy_medicine(source: Path, handle: Any) -> tuple[list[dict[str, Any]], list[str]]:
-    errors: list[str] = []
-    imported: list[dict[str, Any]] = []
-    reader = csv.DictReader(handle)
-    fields = {name.strip().lower(): name for name in reader.fieldnames or []}
-    missing = [name for name in LEGACY_MEDICINE_COLUMNS if name not in fields]
-    if missing:
-        raise ProfileError(source, [f"{source}: missing column(s) {', '.join(missing)}"])
-    for number, raw in enumerate(reader, start=2):
-        row = {
-            "date": (raw.get(fields["date"]) or "").strip(),
-            "time": (raw.get(fields["time"]) or "").strip(),
-            "kind": "medication",
-            "substance": (raw.get(fields["substance"]) or "").strip(),
-            "dose": (raw.get(fields["dosage"]) or "").strip(),
-            "unit": (raw.get(fields["unit"]) or "").strip(),
-            "reason": "",
-            "notes": "",
-        }
-        problem = _validate_event(row, number)
-        if problem:
-            errors.append(problem)
-            continue
-        imported.append(row)
-    return imported, errors
-
-
-def migrate_medicine(
-    legacy: str | Path, events_path: str | Path, *, dry_run: bool = False
-) -> dict[str, Any]:
-    """One-way import of a legacy medicine.csv into events.csv (`kind: medication`)."""
-    source = Path(legacy)
-    imported, errors = _read_legacy_medicine(source)
-    destination = Path(events_path)
-    existing, existing_errors = read_events(destination)
-    if existing_errors:
-        # A header typo or a bad row would make read_events omit rows, so rewriting
-        # the file would erase history. Refuse instead; the caller fixes the file.
-        raise ProfileError(
-            destination,
-            ["refusing to rewrite events.csv: destination has errors", *existing_errors],
-        )
-    known = {_event_key(row) for row in existing}
-    added = [row for row in imported if _event_key(row) not in known]
-    if not dry_run:
-        write_events(destination, [*existing, *added])
-    return {
-        "legacy": str(source),
-        "events": str(destination),
-        "imported": len(added),
-        "skipped": len(imported) - len(added),
-        "dry_run": dry_run,
-        "errors": errors,
-    }
-
-
 # -- CLI ------------------------------------------------------------------
 
 
@@ -540,17 +470,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     settings = Settings()
     parser = argparse.ArgumentParser(
         prog="python -m health_mcp.profile",
-        description="Validate, show or import the host-authored profile. Never runs in the server.",
+        description="Validate or show the host-authored profile. Never runs in the server.",
     )
     parser.add_argument(
         "--profile",
         default=str(settings.profile_path),
         help="profile.yaml path (default: PROFILE_DIR/profile.yaml)",
-    )
-    parser.add_argument(
-        "--events",
-        default=str(settings.events_csv_path),
-        help="events.csv path (default: PROFILE_DIR/events.csv)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
     validate_cmd = sub.add_parser(
@@ -559,11 +484,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     validate_cmd.add_argument("path", nargs="?", default=None)
     show_cmd = sub.add_parser("show", help="print the current profile for review")
     show_cmd.add_argument("path", nargs="?", default=None)
-    migrate_cmd = sub.add_parser(
-        "migrate-medicine", help="import a legacy medicine.csv into events.csv"
-    )
-    migrate_cmd.add_argument("path")
-    migrate_cmd.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
     profile_path = Path(args.path) if getattr(args, "path", None) else Path(args.profile)
@@ -585,25 +505,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         print(dump(profile), end="")
         return 0
-    if args.command == "migrate-medicine":
-        root = Path(settings.profile_dir).resolve()
-        destination = Path(args.events).resolve()
-        try:
-            destination.relative_to(root)
-        except ValueError:
-            print(
-                f"refusing to write outside the profile directory {root}: {destination}",
-                file=sys.stderr,
-            )
-            return 2
-        try:
-            result = migrate_medicine(args.path, destination, dry_run=args.dry_run)
-        except ProfileError as exc:
-            for error in exc.errors:
-                print(error, file=sys.stderr)
-            return 1
-        print(json.dumps(result, indent=2))
-        return 1 if result["errors"] else 0
     parser.error(f"unknown command {args.command!r}")
     return 2
 

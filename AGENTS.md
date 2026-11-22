@@ -47,7 +47,7 @@ uv run python -m health_mcp.server
 - `src/health_mcp/client.py` — Open Wearables API client
 - `src/health_mcp/strong_client.py` — `strong-data` API client
 - `src/health_mcp/profile.py` — profile schema, events.csv reader, host-side CLI
-  (`validate`, `show`, `migrate-medicine`); the only writer under `data/profile/`
+  (`validate`, `show`); the only writer under `data/profile/`
 - `src/health_mcp/store.py` — cache primitives (paths, TTL, bounded sweep)
 - `src/health_mcp/analysis.py` — pure shaping/statistics, no I/O
 - `src/health_mcp/utils.py` — date validation, filtering, caps
