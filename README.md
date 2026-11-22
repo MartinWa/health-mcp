@@ -26,6 +26,18 @@ file-backed source, by providing its files), or restrict the set explicitly with
 configured the other's tools are simply not registered and composites report it
 in `missing`. Enabling a source is a new module under `sources/` only.
 
+The set is resolved once, at startup. One `INFO` line and `get_status.skipped`
+name what is live and why the rest is missing:
+
+```json
+{"message": "sources", "enabled": ["openwearables", "strong"],
+ "skipped": {"events": "no events.csv at /app/data/profile/events.csv"}}
+```
+
+Adding a file the deployment expects therefore needs a restart, not a
+`refresh_cache` call; editing an existing file is re-read on the next call. A
+source that `SOURCES` lists but that is not configured is logged as a warning.
+
 Everything the server reads is read-only: the upstream APIs and, when mounted,
 the profile directory. It has no write path to a source or to the profile and no
 database access, and it does no lifting CSV parsing — `strong-data` imports the
@@ -59,9 +71,11 @@ MCP_BEARER_TOKENS="pi:$(printf %s "$TOKEN" | sha256sum | cut -d' ' -f1)" \
 uv run python -m health_mcp.server
 ```
 
-(`uvicorn health_mcp.asgi:app --host 0.0.0.0 --port 8000 --workers 1` is the
-equivalent direct entrypoint; `MCP_TRANSPORT=http` makes `python -m
-health_mcp.server` use it, honouring `MCP_HOST`/`MCP_PORT`/`MCP_PATH`.)
+(`uvicorn health_mcp.asgi:app` also works, but `python -m health_mcp.server` is
+the supported entrypoint: JSON logs from the first line, no uvicorn banner or access
+log, and `MCP_HOST`/`MCP_PORT`/`MCP_PATH` honoured. Logs go to **stderr** in stdio
+mode — stdout stays the JSON-RPC stream — and to stdout in HTTP mode, the only mode
+where the stream carries nothing else.)
 
 - `MCP_BEARER_TOKENS` is `name:sha256(token)` pairs, one per consumer; the
   single-consumer `MCP_BEARER_TOKEN` alias is hashed to `default`. HTTP mode
@@ -186,6 +200,9 @@ positions only, never the file's content. The MCP instructions carry the
 profile's `intent` only — never `constraints` or `regimen`, which would be
 re-sent on every unrelated question.
 
+Creating either file after startup needs a restart; editing one is picked up on
+the next call.
+
 ## Container
 
 ```bash
@@ -220,9 +237,24 @@ dependencies, and policy-compliant patch updates merge automatically.
 tested `main` commit builds `linux/amd64` and `linux/arm64`, checks both images,
 publishes the multi-platform index to `ghcr.io/<owner>/health-mcp` as `<version>` and
 `latest`, and attests provenance and a per-platform SBOM before creating the GitHub
-Release. GHCR package visibility is independent of the repository; the first release
-may need the package set to public in its settings, and the `latest` tag only moves for
-the current stable release.
+Release. GHCR package visibility is independent of the repository, and the release job
+ends by verifying that an anonymous client can pull the package. Visibility itself is a
+package setting, not an API call (the packages API has no endpoint for it), so a first
+release whose package GitHub created private needs it flipped once under Packages →
+health-mcp → Package settings. The `latest` tag only moves for the current stable
+release.
+
+The reported version is the tag: the release build passes it as the
+`HEALTH_MCP_VERSION` build arg, and the container check fails if `/healthz` and the
+`org.opencontainers.image.version` label disagree. `pyproject.toml`'s
+`project.version` only feeds package metadata, so bumping it is optional. A run takes
+~10 minutes because arm64 is emulated, and `latest` only moves on success — wait for
+green or deploy the version tag, then confirm what runs:
+
+```bash
+docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' \
+  ghcr.io/<owner>/health-mcp:<version>
+```
 
 ## Development
 

@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import secrets
+import sys
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -45,8 +46,33 @@ class BearerAuthMiddleware:
 
         path = scope.get("path", "")
         method = scope.get("method", "GET")
-        if path == self.healthz_path:
-            if method not in ("GET", "HEAD"):
+        started = time.perf_counter()
+        status = 500
+
+        async def send_wrapper(message: dict[str, Any]) -> None:
+            nonlocal status
+            if message.get("type") == "http.response.start":
+                status = int(message.get("status", 500))
+            await send(message)
+
+        try:
+            await self._dispatch(scope, receive, send_wrapper)
+        finally:
+            log.info(
+                "request",
+                extra={
+                    "fields": {
+                        "method": method,
+                        "path": path,
+                        "status": status,
+                        "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                    }
+                },
+            )
+
+    async def _dispatch(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("path", "") == self.healthz_path:
+            if scope.get("method", "GET") not in ("GET", "HEAD"):
                 await _json_response(send, 405, {"error": "method not allowed"})
                 return
             await self.app(scope, receive, send)
@@ -62,29 +88,7 @@ class BearerAuthMiddleware:
             )
             return
 
-        started = time.perf_counter()
-        status = 500
-
-        async def send_wrapper(message: dict[str, Any]) -> None:
-            nonlocal status
-            if message.get("type") == "http.response.start":
-                status = int(message.get("status", 500))
-            await send(message)
-
-        try:
-            await self.app(scope, receive, send_wrapper)
-        finally:
-            log.info(
-                "request",
-                extra={
-                    "fields": {
-                        "method": method,
-                        "path": path,
-                        "status": status,
-                        "duration_ms": round((time.perf_counter() - started) * 1000, 1),
-                    }
-                },
-            )
+        await self.app(scope, receive, send)
 
 
 def create_app(
@@ -93,7 +97,7 @@ def create_app(
     sources: Mapping[str, Source] | None = None,
     cache: CacheStore | None = None,
 ) -> Any:
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, stream=sys.stdout)
     digests = settings.bearer_digests()
     if not digests:
         raise RuntimeError(

@@ -87,6 +87,8 @@ jobs:
           pull: true
           provenance: false
           outputs: type=image,name=${{ steps.release.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            HEALTH_MCP_VERSION=${{ steps.release.outputs.version }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.release.outputs.commit }}
@@ -103,6 +105,8 @@ jobs:
           pull: true
           provenance: false
           outputs: type=image,name=${{ steps.release.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            HEALTH_MCP_VERSION=${{ steps.release.outputs.version }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.release.outputs.commit }}
@@ -180,6 +184,11 @@ jobs:
           if [ "$latest_release" = "$RELEASE_TAG" ]; then
             # Point latest at the tested multi-platform index; nothing is rebuilt.
             docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE@$DIGEST"
+            moved=$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{json .Manifest.Digest}}' | tr -d '"')
+            if [ "$moved" != "$DIGEST" ]; then
+              echo "::error::latest resolves to $moved, not the tested $DIGEST."
+              exit 1
+            fi
             printf 'latest now points to %s@%s\n' "$IMAGE" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "Skipping latest: $RELEASE_TAG is not the current stable release."
@@ -195,12 +204,16 @@ jobs:
           package=${GITHUB_REPOSITORY#*/}
           repository="${owner,,}/${package,,}"
           api_path="users/${owner,,}/packages/container/${package,,}"
-          if [ "$(gh api "$api_path" --jq .visibility 2>/dev/null)" != public ]; then
-            gh api --method PATCH "$api_path" -f visibility=public >/dev/null 2>&1 || true
-          fi
+          # Anonymous pullability is the thing being published, so it is the check.
+          # It runs first and on its own: the packages API cannot change visibility
+          # (there is no PATCH endpoint for it), so a metadata lookup failure must
+          # never decide this step.
           if curl --fail --silent --output /dev/null "https://ghcr.io/token?scope=repository:${repository}:pull"; then
             echo "ghcr.io/$repository is publicly pullable." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          echo "::error::ghcr.io/$repository is not public. Set its visibility once in the package settings, or add a PACKAGE_TOKEN secret with write:packages so this step can do it."
+          # Only now, and only for the error message: distinguish "exists but private"
+          # from "this token cannot see the package". Both fail the run.
+          visibility=$(gh api "$api_path" --jq .visibility 2>/dev/null || echo "not readable with this token")
+          echo "::error::ghcr.io/$repository is not anonymously pullable (visibility: ${visibility}). Visibility is a package setting, not an API call: set it once under Packages → ${package} → Package settings, then re-run this job. A package that already is public but unreadable here is a token scope problem, not a publish failure."
           exit 1

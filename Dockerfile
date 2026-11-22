@@ -12,10 +12,15 @@ RUN apt-get update \
 
 FROM python-base AS runtime
 
+# The release workflow passes the Git tag, so the image reports what was tagged
+# even though the installed package metadata is only bumped per release.
+ARG HEALTH_MCP_VERSION=development
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
+    HEALTH_MCP_VERSION=${HEALTH_MCP_VERSION} \
     FASTMCP_CHECK_FOR_UPDATES=off \
     FASTMCP_SHOW_SERVER_BANNER=false \
     FASTMCP_ENABLE_RICH_LOGGING=false \

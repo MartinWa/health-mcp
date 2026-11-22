@@ -53,6 +53,10 @@ def configured(settings: Settings) -> bool:
     return bool(settings.ow_api_key and settings.ow_user_id and settings.ow_base_url)
 
 
+def skip_reason(settings: Settings) -> str:
+    return "OW_API_KEY, OW_USER_ID and OW_BASE_URL must all be set"
+
+
 class OpenWearablesSource:
     NAME: ClassVar[str] = NAME
     cache_namespace: ClassVar[str] = CACHE_NAMESPACE

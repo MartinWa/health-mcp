@@ -91,6 +91,10 @@ def configured(settings: Settings) -> bool:
     return bool(settings.strong_api_url and settings.strong_api_token)
 
 
+def skip_reason(settings: Settings) -> str:
+    return "STRONG_API_URL and STRONG_API_TOKEN must both be set"
+
+
 class StrongSource:
     NAME: ClassVar[str] = NAME
     cache_namespace: ClassVar[str] = CACHE_NAMESPACE

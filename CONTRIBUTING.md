@@ -48,6 +48,8 @@ The helper refuses a dirty tree or a branch other than `main`, rejects a prefix 
 prerelease suffix, never overwrites an existing tag and only pushes when given `-Push`;
 pushing the tag is what starts publication. Omitting `-Version` increments the patch
 component of the latest stable tag, and the first release needs an explicit version.
+The tag is also the version the service reports (`HEALTH_MCP_VERSION` build arg →
+`/healthz`); `pyproject.toml`'s `project.version` is metadata only, not a release gate.
 The equivalent by hand:
 
 ```bash

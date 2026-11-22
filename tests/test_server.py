@@ -320,3 +320,20 @@ def test_tier_b_tools_are_exposed_to_the_health_agent_only(tmp_path):
     assert tier_b <= health
     assert not tier_b & coach
     assert {"get_lifting_summary", "get_overview", "get_status"} <= health & coach
+
+
+def test_status_names_the_sources_that_were_skipped(tmp_path):
+    from fastmcp import Client
+
+    settings = both_settings(tmp_path, sources="openwearables,strong,events")
+    mcp = create_server(settings)
+
+    async def go():
+        async with Client(mcp) as client:
+            return await client.call_tool("get_status", {})
+
+    status = run(go())
+    assert set(status.data["sources"]) == {"openwearables", "strong"}
+    assert "events" in status.data["skipped"]
+    assert "events.csv" in status.data["skipped"]["events"]
+    assert status.data["server_version"] == __import__("health_mcp").__version__

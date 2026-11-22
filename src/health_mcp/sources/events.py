@@ -29,6 +29,10 @@ def configured(settings: Settings) -> bool:
     return settings.events_csv_path.exists()
 
 
+def skip_reason(settings: Settings) -> str:
+    return f"no events.csv at {settings.events_csv_path}"
+
+
 class EventsSource:
     NAME: ClassVar[str] = NAME
     cache_namespace: ClassVar[str] = CACHE_NAMESPACE
