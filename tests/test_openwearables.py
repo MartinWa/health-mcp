@@ -343,3 +343,99 @@ def test_consistency_propagates_the_page_ceiling(tmp_path):
     assert out["fetch_truncated"] == {"weight": True, "sleep": False, "workouts": False}
     assert out["complete"] is False
     assert "page ceiling" in out["warning"]
+
+
+def test_summary_paging_falls_back_to_date_windows(tmp_path):
+    from datetime import date, timedelta
+
+    calls: list[dict] = []
+
+    def day_rows(first: str, last: str) -> list[dict]:
+        start, end = date.fromisoformat(first), date.fromisoformat(last)
+        return [
+            {"date": (start + timedelta(days=offset)).isoformat(), "steps": 1000}
+            for offset in range((end - start).days + 1)
+        ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        calls.append(params)
+        if "cursor" in params:
+            return httpx.Response(500, json={"detail": "Internal Server Error"})
+        rows = day_rows(params["start_date"], params["end_date"])
+        if len(calls) == 1:
+            return httpx.Response(200, json=page(rows, has_more=True, cursor="c1"))
+        return httpx.Response(200, json=page(rows))
+
+    source, client = make_source(tmp_path, handler)
+
+    async def go():
+        try:
+            return await source.get_activity_summary("2026-01-01", "2026-01-10")
+        finally:
+            await client.aclose()
+
+    out = run(go())
+    assert "error" not in out
+    assert out["points"] == 10
+    assert out["fetch_truncated"] is False
+    assert sum("cursor" in params for params in calls) == 1
+    assert len(calls) == 4
+
+
+def test_paging_failure_on_the_first_page_is_an_error(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"detail": "Internal Server Error"})
+
+    source, client = make_source(tmp_path, handler)
+
+    async def go():
+        try:
+            return await source.get_activity_summary("2026-01-01", "2026-01-10")
+        finally:
+            await client.aclose()
+
+    out = run(go())
+    assert out["error"] == "Open Wearables returned 500"
+
+
+def test_a_single_day_window_keeps_the_first_page_when_paging_fails(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "cursor" in request.url.params:
+            return httpx.Response(500, json={"detail": "Internal Server Error"})
+        return httpx.Response(
+            200, json=page([{"date": "2026-01-01", "steps": 7000}], has_more=True, cursor="c1")
+        )
+
+    source, client = make_source(tmp_path, handler)
+
+    async def go():
+        try:
+            return await source.get_activity_summary("2026-01-01", "2026-01-01")
+        finally:
+            await client.aclose()
+
+    out = run(go())
+    assert out["points"] == 1
+    assert out["fetch_truncated"] is True
+
+
+def test_overview_reports_the_error_of_the_block_that_failed(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("summaries/activity"):
+            return httpx.Response(500, json={"detail": "Internal Server Error"})
+        return httpx.Response(200, json=page([]))
+
+    source, client = make_source(tmp_path, handler)
+
+    async def go():
+        try:
+            return await source.overview("2026-01-01", "2026-01-10")
+        finally:
+            await client.aclose()
+
+    out = run(go())
+    assert out["activity"]["error"] == "Open Wearables returned 500"
+    assert out["failed_blocks"] == ["activity"]
+    assert out["error"] == "Open Wearables returned 500"
+    assert "No data for this period" in out["weight"]["error"]

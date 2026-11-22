@@ -102,6 +102,23 @@ def test_overview_composite_merges_sources_and_marks_missing(tmp_path):
     assert ow_only["weight"] == {"start_kg": 80.0}
 
 
+def test_overview_composite_marks_a_failed_block_in_missing(tmp_path):
+    ow = FakeSource(
+        "openwearables",
+        overview={
+            "weight": {"start_kg": 80.0},
+            "activity": {"error": "Open Wearables returned 500"},
+            "failed_blocks": ["activity"],
+            "error": "Open Wearables returned 500",
+        },
+    )
+    out = run(compose_overview({"openwearables": ow}, "2026-01-01", "2026-01-31"))
+    assert out["missing"] == ["openwearables.activity", "strong"]
+    assert out["activity"] == {"error": "Open Wearables returned 500"}
+    assert out["openwearables_error"] == "Open Wearables returned 500"
+    assert out["weight"] == {"start_kg": 80.0}
+
+
 def test_overview_composite_rejects_a_bad_range():
     out = run(compose_overview({}, "2026-02-01", "2026-01-01"))
     assert "after end_date" in out["error"]

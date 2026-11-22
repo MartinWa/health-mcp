@@ -139,6 +139,8 @@ async def compose_overview(
         block = await _call(openwearables, "overview", start_date, end_date)
         for key in ("weight", "sleep", "activity", "recovery", "workouts", "logging"):
             out[key] = block.get(key)
+        for name in block.get("failed_blocks") or []:
+            out["missing"].append(f"openwearables.{name}")
         if "error" in block:
             out["openwearables_error"] = block["error"]
     strong = sources.get("strong")
@@ -162,6 +164,8 @@ async def compose_checkin(sources: Mapping[str, Source], date: str) -> dict[str,
         block = await _call(openwearables, "daily", date)
         for key in ("weight_kg", "sleep_hours", "workout_minutes", "recovery_score"):
             out[key] = block.get(key)
+        for name in block.get("failed_blocks") or []:
+            out["missing"].append(f"openwearables.{name}")
         if "error" in block:
             out["openwearables_error"] = block["error"]
     strong = sources.get("strong")

@@ -93,6 +93,9 @@ registered whenever the server starts.
 `get_overview` and `get_daily_checkin` draw on both sources; without one they
 return the partial answer plus `"missing": [...]`, while
 `get_sleep_training_correlation` returns an error naming the missing source.
+A single Open Wearables block that fails (for example an upstream 500 on activity)
+is named in `missing` as `openwearables.<block>` and carries the upstream message
+in its `error` field, so a broken source never reads as "no data".
 `get_sleep_training_correlation` defaults to `lag_days=1` (lifting volume on day
 D vs sleep on D+1) and always reports `n`, `lag_days`, `definition` and
 `period`; `r` is added once there are at least three overlapping days.
@@ -117,6 +120,15 @@ Goal targets come from `profile.yaml`: `kg` and `lb` are converted and any other
 weight unit is rejected. When a local file is unreadable or missing, or an
 upstream fetch hits the page ceiling, the affected answer returns an error or an
 `exact: false` warning instead of a quiet subset.
+
+Open Wearables answers a repeated cursor with `500` on some summary endpoints
+(activity among them), so the client follows a cursor page without retries and,
+when one fails, re-reads the same rows as disjoint date windows. A range longer
+than the page size therefore still returns every day; only a window that fails on
+its own first page is reported with `fetch_truncated: true`. Recovery, readiness
+and stress scores exist only if the wearables that produce them are connected —
+without one, those blocks answer `No data for this period`, which is data
+availability, not a failure.
 
 Generate the exact list for a deployment (this is the only sanctioned source for
 the README table and for the ZeroClaw `auto_approve` list):

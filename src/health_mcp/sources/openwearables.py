@@ -207,7 +207,13 @@ class OpenWearablesSource:
             self._workouts_df(start, end),
             return_exceptions=True,
         )
-        errors = [str(item) for item in results if isinstance(item, BaseException)]
+        errors = {
+            name: str(item)
+            for name, item in zip(
+                ("weight", "sleep", "activity", "recovery", "workouts"), results, strict=True
+            )
+            if isinstance(item, BaseException)
+        }
         frames: list[pd.DataFrame] = []
         for item in results:
             if isinstance(item, BaseException):
@@ -235,8 +241,11 @@ class OpenWearablesSource:
         for block in ("weight", "sleep", "activity", "recovery"):
             out[block].pop("series_included", None)
             out[block].pop("total_points", None)
+        for block, message in errors.items():
+            out[block]["error"] = message
         if errors:
-            out["error"] = "; ".join(errors)
+            out["error"] = "; ".join(errors.values())
+            out["failed_blocks"] = list(errors)
         return out
 
     async def daily(self, day: str) -> dict[str, Any]:
@@ -251,7 +260,11 @@ class OpenWearablesSource:
         weight, sleep, workouts, recovery = [
             pd.DataFrame() if isinstance(item, BaseException) else item[0] for item in results
         ]
-        errors = [str(item) for item in results if isinstance(item, BaseException)]
+        errors = {
+            name: str(item)
+            for name, item in zip(("weight", "sleep", "workouts", "recovery"), results, strict=True)
+            if isinstance(item, BaseException)
+        }
         weights: Any = weight.get("weight_kg")
         out["weight_kg"] = (
             round(float(weights.iloc[-1]), 2) if weights is not None and len(weights) else None
@@ -272,7 +285,8 @@ class OpenWearablesSource:
         scores: Any = recovery.get("recovery_score")
         out["recovery_score"] = int(scores.iloc[-1]) if scores is not None and len(scores) else None
         if errors:
-            out["error"] = "; ".join(errors)
+            out["error"] = "; ".join(errors.values())
+            out["failed_blocks"] = list(errors)
         return out
 
     async def sleep_hours_by_date(self, start: str, end: str) -> dict[str, float]:

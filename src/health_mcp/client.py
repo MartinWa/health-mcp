@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from typing import Any
 from urllib.parse import quote
 
@@ -11,6 +14,9 @@ import httpx
 
 RETRYABLE = frozenset({429, 500, 502, 503, 504})
 DEFAULT_MAX_PAGES = 20
+MAX_SPLIT_DEPTH = 4
+
+log = logging.getLogger(__name__)
 
 
 class OpenWearablesError(RuntimeError):
@@ -24,6 +30,18 @@ class Page:
     rows: list[dict[str, Any]] = field(default_factory=list)
     truncated: bool = False
     pages: int = 0
+    failed: bool = False
+
+
+def _unique_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for row in rows:
+        key = json.dumps(row, sort_keys=True, default=str)
+        if key not in seen:
+            seen.add(key)
+            unique.append(row)
+    return unique
 
 
 class OpenWearablesClient:
@@ -53,17 +71,20 @@ class OpenWearablesClient:
         if not self._client.is_closed:
             await self._client.aclose()
 
-    async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    async def _get(
+        self, path: str, params: dict[str, Any] | None = None, *, retries: int | None = None
+    ) -> Any:
         clean = {key: value for key, value in (params or {}).items() if value is not None}
+        attempts = self.max_retries if retries is None else retries
         last: Exception | None = None
-        for attempt in range(self.max_retries + 1):
+        for attempt in range(attempts + 1):
             try:
                 response = await self._client.get(path, params=clean)
                 response.raise_for_status()
                 return response.json()
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code if exc.response is not None else 0
-                if status in RETRYABLE and attempt < self.max_retries:
+                if status in RETRYABLE and attempt < attempts:
                     last = exc
                     await asyncio.sleep(self.backoff * 2**attempt)
                     continue
@@ -72,7 +93,7 @@ class OpenWearablesClient:
                 ) from exc
             except (httpx.ConnectError, httpx.TimeoutException, httpx.ReadError) as exc:
                 last = exc
-                if attempt < self.max_retries:
+                if attempt < attempts:
                     await asyncio.sleep(self.backoff * 2**attempt)
                     continue
                 raise OpenWearablesError(f"Open Wearables is unavailable: {exc}") from exc
@@ -94,7 +115,24 @@ class OpenWearablesClient:
             query = dict(params or {})
             if cursor:
                 query["cursor"] = cursor
-            data = await self._get(path, query)
+            try:
+                # A repeated cursor that fails is deterministic, and the date-window
+                # fallback re-reads the same rows, so a cursor page is not retried.
+                data = await self._get(path, query, retries=0 if cursor else None)
+            except OpenWearablesError as exc:
+                if pages == 0:
+                    raise
+                log.warning(
+                    "paging stopped; falling back to date windows",
+                    extra={
+                        "fields": {
+                            "endpoint": path.rsplit("/", 1)[-1],
+                            "pages": pages,
+                            "status": getattr(exc, "status", None),
+                        }
+                    },
+                )
+                return Page(rows=rows, truncated=True, pages=pages, failed=True)
             rows.extend(data.get("data") or [])
             pages += 1
             pagination = data.get("pagination") or {}
@@ -102,28 +140,68 @@ class OpenWearablesClient:
             if not pagination.get("has_more") or not cursor:
                 return Page(rows=rows, truncated=False, pages=pages)
 
+    async def _paginated_days(
+        self,
+        path: str,
+        start: str,
+        end: str,
+        *,
+        extra: dict[str, Any] | None = None,
+        max_pages: int = DEFAULT_MAX_PAGES,
+        depth: int = 0,
+    ) -> Page:
+        """Day-ranged paging that splits the window when the cursor stops working.
+
+        Open Wearables answers a repeated cursor for some endpoints with 500, which
+        would otherwise discard every row after the first page. The windows are
+        disjoint, so a split returns the same rows the cursor would have.
+        """
+        params = {**(extra or {}), "start_date": start, "end_date": end}
+        page = await self._paginated(path, params, max_pages=max_pages)
+        try:
+            first, last = date.fromisoformat(start), date.fromisoformat(end)
+        except ValueError:
+            return page
+        if not page.failed or depth >= MAX_SPLIT_DEPTH or first >= last:
+            return page
+        middle = first + (last - first) // 2
+        halves = await asyncio.gather(
+            self._paginated_days(
+                path, start, middle.isoformat(), extra=extra, max_pages=max_pages, depth=depth + 1
+            ),
+            self._paginated_days(
+                path,
+                (middle + timedelta(days=1)).isoformat(),
+                end,
+                extra=extra,
+                max_pages=max_pages,
+                depth=depth + 1,
+            ),
+            return_exceptions=True,
+        )
+        if any(isinstance(half, BaseException) for half in halves):
+            return page
+        left, right = (half for half in halves if isinstance(half, Page))
+        return Page(
+            rows=_unique_rows([*left.rows, *right.rows]),
+            truncated=left.truncated or right.truncated,
+            pages=page.pages + left.pages + right.pages,
+        )
+
     def _user(self, uid: str, suffix: str) -> str:
         return f"/api/v1/users/{quote(uid, safe='')}/{suffix}"
 
     async def activity(self, uid: str, s: str, e: str) -> Page:
-        return await self._paginated(
-            self._user(uid, "summaries/activity"), {"start_date": s, "end_date": e}
-        )
+        return await self._paginated_days(self._user(uid, "summaries/activity"), s, e)
 
     async def sleep(self, uid: str, s: str, e: str) -> Page:
-        return await self._paginated(
-            self._user(uid, "summaries/sleep"), {"start_date": s, "end_date": e}
-        )
+        return await self._paginated_days(self._user(uid, "summaries/sleep"), s, e)
 
     async def recovery(self, uid: str, s: str, e: str) -> Page:
-        return await self._paginated(
-            self._user(uid, "summaries/recovery"), {"start_date": s, "end_date": e}
-        )
+        return await self._paginated_days(self._user(uid, "summaries/recovery"), s, e)
 
     async def workouts(self, uid: str, s: str, e: str) -> Page:
-        return await self._paginated(
-            self._user(uid, "events/workouts"), {"start_date": s, "end_date": e}
-        )
+        return await self._paginated_days(self._user(uid, "events/workouts"), s, e)
 
     async def health_scores(
         self,
