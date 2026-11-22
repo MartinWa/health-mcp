@@ -27,8 +27,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 BACKUP_KEEP = 10
 EVENT_COLUMNS = ("date", "time", "kind", "substance", "dose", "unit", "reason", "notes")
-EVENT_KINDS = ("medication", "supplement", "symptom", "note", "measurement")
+EVENT_KINDS = ("medication", "supplement", "vaccination", "symptom", "note", "measurement")
 DOSE_KINDS = frozenset({"medication", "supplement"})
+SUBSTANCE_KINDS = DOSE_KINDS | {"vaccination"}
 LEGACY_MEDICINE_COLUMNS = ("date", "substance", "dosage", "unit", "time")
 SECTIONS = ("intent", "constraints", "regimen")
 
@@ -59,6 +60,8 @@ class Program(_Model):
     phase: str | None = None
     started: date | None = None
     deload_every_weeks: Annotated[int | None, Field(ge=1, le=52)] = None
+    sessions_per_week: Annotated[int | None, Field(ge=1, le=14)] = None
+    progression: str | None = None
 
 
 class Intent(_Model):
@@ -291,7 +294,9 @@ def intent_digest(intent: Intent | None, max_chars: int = 800) -> str:
         parts = [
             program.name,
             program.phase,
+            f"{program.sessions_per_week} sessions/week" if program.sessions_per_week else None,
             f"deload every {program.deload_every_weeks}w" if program.deload_every_weeks else None,
+            program.progression,
         ]
         lines.append("Program: " + ", ".join(part for part in parts if part))
     if intent.notes:
@@ -381,7 +386,7 @@ def _validate_event(row: dict[str, Any], number: int) -> str | None:
             datetime.strptime(row["time"], "%H:%M")
         except ValueError:
             return _row_error(number, "time is not HH:MM")
-    if kind in DOSE_KINDS and not row["substance"]:
+    if kind in SUBSTANCE_KINDS and not row["substance"]:
         return _row_error(number, f"{kind} rows need a substance")
     if row["dose"]:
         try:

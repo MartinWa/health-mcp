@@ -271,6 +271,35 @@ def test_medicine_logs_separates_doses_symptoms_and_notes():
     assert "never" not in "".join(row["substance"] for row in out["doses"])
 
 
+def test_medicine_logs_lists_vaccinations_without_counting_them_as_doses():
+    rows = [
+        {
+            "date": "2026-11-20",
+            "time": "08:00",
+            "kind": "medication",
+            "substance": "a",
+            "dose": 50,
+            "unit": "µg",
+        },
+        {
+            "date": "2026-11-22",
+            "kind": "vaccination",
+            "substance": "influenza vaccine",
+            "dose": 1,
+            "unit": "dose",
+            "reason": "annual",
+            "notes": "left deltoid",
+        },
+    ]
+    out = A.medicine_logs(rows, "2026-11-20", "2026-11-22")
+    assert [row["substance"] for row in out["doses"]] == ["a"]
+    assert out["doses"][0]["count"] == 1
+    assert out["vaccinations_count"] == 1
+    assert out["vaccinations"][0]["substance"] == "influenza vaccine"
+    assert out["vaccinations"][0]["notes"] == "left deltoid"
+    assert "vaccinations" in out["definition"]
+
+
 def test_medicine_impact_compares_days_and_reports_insufficient_data():
     doses = [
         {"date": "2026-11-01", "kind": "medication", "substance": "Example-Med"},
