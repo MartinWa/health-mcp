@@ -36,7 +36,7 @@ pythonVersion = "3.11"
 reportMissingTypeStubs = false
 
 [tool.pytest.ini_options]
-pythonpath = ["src", "tests"]
+pythonpath = [".", "src", "tests"]
 testpaths = ["tests"]
 markers = ["live: hits the live upstream APIs (skipped without credentials)"]
 
