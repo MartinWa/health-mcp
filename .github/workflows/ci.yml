@@ -1,31 +1,102 @@
-name: ci
+name: CI
 
 on:
+  pull_request:
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "29 6 * * 1"
 
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  UV_VERSION: "0.13.9"
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
+
 jobs:
-  check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+  checks:
+    name: Checks (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.4.0
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          enable-cache: true
-      - name: Install ripgrep for the PII audit
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: false
+      - name: Install system tools for the audits
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ripgrep
-      - run: uv sync --frozen
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run pyright
-      - run: uv run pytest -q
-      - run: bash scripts/pii_audit.sh
+      - name: Check dependency lockfile
+        run: uv lock --check
+      - name: Install the locked environment
+        run: uv sync --frozen
+      - name: Lint and check formatting
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+      - name: Type-check
+        run: uv run pyright
+      - name: Run tests
+        run: uv run pytest -q
+      - name: Audit for personal data and secrets
+        run: bash scripts/pii_audit.sh
+      - name: Audit locked Python dependencies
+        run: |
+          uv export --locked --no-emit-project --format requirements-txt \
+            --output-file "$RUNNER_TEMP/audit-requirements.txt" > /dev/null
+          uvx --python 3.14 --from pip-audit==2.10.1 pip-audit --disable-pip --strict \
+            --progress-spinner off -r "$RUNNER_TEMP/audit-requirements.txt"
+      - name: Validate workflow syntax
+        run: |
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            --output "$RUNNER_TEMP/actionlint.tar.gz"
+          printf '%s  %s\n' '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8' \
+            "$RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+
+  container:
+    name: Container (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build the production image without publishing
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          target: runtime
+          load: true
+          push: false
+          provenance: false
+          tags: health-mcp:ci
+          no-cache: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          cache-from: type=gha,scope=ci-production
+          cache-to: type=gha,scope=ci-production,mode=max
+          github-token: ""
+      - name: Verify non-root startup and the bearer-auth boundary
+        run: bash tools/check_container.sh health-mcp:ci
+      - name: Verify the image runs as non-root
+        run: test "$(docker run --rm health-mcp:ci id -u)" != "0"
+      - name: Audit the production image
+        run: bash tools/audit_image.sh health-mcp:ci
