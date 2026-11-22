@@ -1,6 +1,6 @@
 [project]
 name = "health-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "MCP server for personal health data (Open Wearables + strong-data)"
 requires-python = ">=3.11"
 dependencies = [

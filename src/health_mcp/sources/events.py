@@ -78,7 +78,16 @@ class EventsSource:
         return self._rows
 
     def _in_range(self, start: str, end: str) -> list[dict[str, Any]]:
-        return [row for row in self.rows() if start <= str(row.get("date") or "") <= end]
+        """Rows whose own day, or the range they cover, overlaps [start, end]."""
+        out: list[dict[str, Any]] = []
+        for row in self.rows():
+            day = str(row.get("date") or "")
+            if not day:
+                continue
+            last = str(row.get("end_date") or day)
+            if day <= end and last >= start:
+                out.append(row)
+        return out
 
     def doses(self, start: str, end: str) -> list[dict[str, Any]]:
         """Only medication/supplement rows: a symptom is never a dose."""

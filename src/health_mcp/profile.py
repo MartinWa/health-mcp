@@ -23,13 +23,15 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 BACKUP_KEEP = 10
 EVENT_COLUMNS = ("date", "time", "kind", "substance", "dose", "unit", "reason", "notes")
+EVENT_OPTIONAL_COLUMNS = ("end_date", "every_days")
 EVENT_KINDS = ("medication", "supplement", "vaccination", "symptom", "note", "measurement")
 DOSE_KINDS = frozenset({"medication", "supplement"})
 SUBSTANCE_KINDS = DOSE_KINDS | {"vaccination"}
+MAX_EVERY_DAYS = 366
 LEGACY_MEDICINE_COLUMNS = ("date", "substance", "dosage", "unit", "time")
 SECTIONS = ("intent", "constraints", "regimen")
 
@@ -96,7 +98,18 @@ class Constraints(_Model):
     allergies: list[Allergy] = []
 
 
-class Medication(_Model):
+class _Interval(_Model):
+    started: date | None = None
+    stopped: date | None = None
+
+    @model_validator(mode="after")
+    def _ordered(self) -> _Interval:
+        if self.started and self.stopped and self.stopped < self.started:
+            raise ValueError("stopped is before started")
+        return self
+
+
+class Medication(_Interval):
     substance: str
     dose: float | None = None
     unit: str | None = None
@@ -105,7 +118,7 @@ class Medication(_Model):
     prescriber: str | None = None
 
 
-class Supplement(_Model):
+class Supplement(_Interval):
     substance: str
     dose: float | None = None
     unit: str | None = None
@@ -323,6 +336,8 @@ def regimen_plans(profile: Profile | None) -> list[dict[str, Any]]:
                     "dose": row.dose,
                     "unit": row.unit,
                     "schedule": row.schedule,
+                    "started": row.started.isoformat() if row.started else None,
+                    "stopped": row.stopped.isoformat() if row.stopped else None,
                 }
             )
     return plans
@@ -360,7 +375,10 @@ def _read_event_rows(target: Path, handle: Any) -> tuple[list[dict[str, Any]], l
     if missing:
         return [], [f"{target}: missing column(s) {', '.join(missing)}"]
     for number, raw in enumerate(reader, start=2):
-        row = {name: (raw.get(name) or "").strip() for name in EVENT_COLUMNS}
+        row = {
+            name: (raw.get(name) or "").strip()
+            for name in (*EVENT_COLUMNS, *EVENT_OPTIONAL_COLUMNS)
+        }
         if not any(row.values()):
             continue
         problem = _validate_event(row, number)
@@ -374,9 +392,28 @@ def _read_event_rows(target: Path, handle: Any) -> tuple[list[dict[str, Any]], l
 def _validate_event(row: dict[str, Any], number: int) -> str | None:
     # Messages carry the row number and field only: event values are private data.
     try:
-        date.fromisoformat(row["date"])
+        day = date.fromisoformat(row["date"])
     except ValueError:
         return _row_error(number, "date is not YYYY-MM-DD")
+    end_date = str(row.get("end_date") or "").strip()
+    if end_date:
+        try:
+            covered_to = date.fromisoformat(end_date)
+        except ValueError:
+            return _row_error(number, "end_date is not YYYY-MM-DD")
+        if covered_to < day:
+            return _row_error(number, "end_date is before date")
+    every_days = str(row.get("every_days") or "").strip()
+    if every_days:
+        try:
+            every = int(every_days)
+        except ValueError:
+            return _row_error(number, "every_days is not a whole number")
+        if not 1 <= every <= MAX_EVERY_DAYS:
+            return _row_error(number, f"every_days must be 1-{MAX_EVERY_DAYS}")
+        if every > 1 and not end_date:
+            return _row_error(number, "every_days above 1 needs end_date")
+        row["every_days"] = every
     kind = str(row["kind"]).lower()
     if kind not in EVENT_KINDS:
         return _row_error(number, f"kind is not one of {', '.join(EVENT_KINDS)}")
@@ -400,13 +437,14 @@ def write_events(path: str | Path, rows: Iterable[Mapping[str, Any]]) -> Path:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     backup(target)
+    columns = (*EVENT_COLUMNS, *EVENT_OPTIONAL_COLUMNS)
     ordered = sorted(rows, key=lambda row: (str(row.get("date") or ""), str(row.get("time") or "")))
     temporary = target.with_suffix(target.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(EVENT_COLUMNS), extrasaction="ignore")
+        writer = csv.DictWriter(handle, fieldnames=list(columns), extrasaction="ignore")
         writer.writeheader()
         for row in ordered:
-            writer.writerow({name: _cell(row.get(name)) for name in EVENT_COLUMNS})
+            writer.writerow({name: _cell(row.get(name)) for name in columns})
     os.replace(temporary, target)
     return target
 
@@ -420,7 +458,7 @@ def _cell(value: Any) -> str:
 
 
 def _event_key(row: Mapping[str, Any]) -> tuple[str, ...]:
-    return tuple(_cell(row.get(name)) for name in EVENT_COLUMNS)
+    return tuple(_cell(row.get(name)) for name in (*EVENT_COLUMNS, *EVENT_OPTIONAL_COLUMNS))
 
 
 def _read_legacy_medicine(source: Path) -> tuple[list[dict[str, Any]], list[str]]:

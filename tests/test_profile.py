@@ -387,3 +387,92 @@ def test_yaml_invalid_date_is_a_sanitized_value_error(tmp_path):
     profile, errors = P.read(path)
     assert profile is None
     assert errors == [f"{path}: YAML value error"]
+
+
+def test_optional_range_columns_are_validated(tmp_path):
+    header = "date,time,kind,substance,dose,unit,reason,notes,end_date,every_days\n"
+    good = (
+        header
+        + "2026-11-20,08:00,medication,example-med,50,µg,,,2026-11-27,7\n"
+        + "2026-11-20,08:00,medication,example-med,50,µg,,,,\n"
+    )
+    rows, errors = P.read_events(write(tmp_path, "ok.csv", good))
+    assert errors == []
+    assert len(rows) == 2
+    assert rows[0]["end_date"] == "2026-11-27"
+    assert rows[0]["every_days"] == 7
+    assert rows[1]["end_date"] == ""
+
+    bad_end = header + "2026-11-20,,medication,example-med,50,µg,,,2026-11-19,\n"
+    rows, errors = P.read_events(write(tmp_path, "bad-end.csv", bad_end))
+    assert rows == []
+    assert errors == ["row 2: end_date is before date"]
+
+    bad_format = header + "2026-11-20,,medication,example-med,50,µg,,,27-11-2026,\n"
+    rows, errors = P.read_events(write(tmp_path, "bad-fmt.csv", bad_format))
+    assert errors == ["row 2: end_date is not YYYY-MM-DD"]
+
+    no_window = header + "2026-11-20,,medication,example-med,50,µg,,,27-11-2026,7\n"
+    _, errors = P.read_events(write(tmp_path, "no-window.csv", no_window))
+    assert errors == ["row 2: end_date is not YYYY-MM-DD"]
+
+    orphan_frequency = header + "2026-11-20,,medication,example-med,50,µg,,, ,7\n"
+    _, errors = P.read_events(write(tmp_path, "orphan.csv", orphan_frequency))
+    assert errors == ["row 2: every_days above 1 needs end_date"]
+
+    out_of_range = header + "2026-11-20,,medication,example-med,50,µg,,,2026-11-27,367\n"
+    _, errors = P.read_events(write(tmp_path, "freq.csv", out_of_range))
+    assert errors == ["row 2: every_days must be 1-366"]
+
+
+def test_the_original_eight_columns_still_work(tmp_path):
+    rows, errors = P.read_events(write(tmp_path, "legacy.csv", EVENTS))
+    assert errors == []
+    assert len(rows) == 4
+    assert rows[0].get("end_date", "") == ""
+
+
+def test_write_events_keeps_the_range_columns(tmp_path):
+    path = tmp_path / "events.csv"
+    P.write_events(
+        path,
+        [
+            {
+                "date": "2026-11-20",
+                "time": "08:00",
+                "kind": "medication",
+                "substance": "example-med",
+                "dose": 50,
+                "unit": "µg",
+                "end_date": "2026-11-27",
+                "every_days": 7,
+            }
+        ],
+    )
+    rows, errors = P.read_events(path)
+    assert errors == []
+    assert rows[0]["end_date"] == "2026-11-27"
+    assert rows[0]["every_days"] == 7
+    assert "end_date" in path.read_text(encoding="utf-8").splitlines()[0]
+
+
+def test_regimen_intervals_are_optional_and_ordered(tmp_path):
+    text = VALID.replace(
+        "- {substance: example-med, dose: 50, unit: µg, schedule: daily}",
+        "- {substance: example-med, dose: 50, unit: µg, schedule: daily,\n"
+        '       started: "2026-01-01", stopped: "2026-11-01"}',
+    )
+    profile = P.load(write(tmp_path, "interval.yaml", text))
+    assert profile.regimen is not None
+    plan = P.regimen_plans(profile)[0]
+    assert (plan["started"], plan["stopped"]) == ("2026-01-01", "2026-11-01")
+
+    backwards = VALID.replace(
+        "- {substance: example-med, dose: 50, unit: µg, schedule: daily}",
+        "- {substance: example-med, dose: 50, unit: µg, schedule: daily,\n"
+        '       started: "2026-05-01", stopped: "2026-01-01"}',
+    )
+    profile, errors = P.read(write(tmp_path, "backwards.yaml", backwards))
+    assert profile is None
+    assert errors[0].startswith("regimen.medications[0]")
+    assert "stopped is before started" in errors[0]
