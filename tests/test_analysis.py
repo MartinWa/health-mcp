@@ -87,6 +87,92 @@ def test_schedule_per_day_only_interprets_unambiguous_text():
     assert A.schedule_per_day(None) is None
 
 
+def test_schedule_step_recognises_a_single_dose_grid():
+    assert A.schedule_step("daily") == 1
+    assert A.schedule_step("Every day") == 1
+    assert A.schedule_step("weekly") == 7
+    assert A.schedule_step("every 7 days") == 7
+    assert A.schedule_step("every 14 days") == 14
+    assert A.schedule_step("every 2 weeks") == 14
+    assert A.schedule_step("twice daily") is None
+    assert A.schedule_step("as needed") is None
+    assert A.schedule_step(None) is None
+
+
+def test_adherence_expected_counts_the_anchored_grid_of_a_weekly_course():
+    planned = [
+        {
+            "kind": "medication",
+            "substance": "example-med",
+            "dose": 10,
+            "unit": "mg",
+            "schedule": "weekly",
+            "started": "2026-01-05",
+            "stopped": "2026-01-26",
+        },
+        {
+            "kind": "medication",
+            "substance": "example-med",
+            "dose": 12.5,
+            "unit": "mg",
+            "schedule": "weekly",
+            "started": "2026-02-02",
+            "stopped": "2026-02-23",
+        },
+    ]
+    doses = [
+        {"date": d, "kind": "medication", "substance": "example-med"}
+        for d in (
+            "2026-01-05",
+            "2026-01-12",
+            "2026-01-19",
+            "2026-01-26",
+            "2026-02-02",
+            "2026-02-09",
+            "2026-02-16",
+        )
+    ]
+    out = A.medication_adherence(planned, doses, "2026-01-01", "2026-02-28")
+    item = out["items"][0]
+    assert (item["expected"], item["logged"]) == (8.0, 7)
+    assert item["adherence_pct"] == 87.5
+    assert item["missing_days"] is None
+
+
+def test_adherence_expected_and_logged_agree_on_a_complete_weekly_course():
+    planned = [
+        {
+            "kind": "medication",
+            "substance": "example-med",
+            "schedule": "every 14 days",
+            "started": "2026-01-05",
+            "stopped": "2026-03-02",
+        }
+    ]
+    doses = [
+        {"date": d, "kind": "medication", "substance": "example-med"}
+        for d in ("2026-01-05", "2026-01-19", "2026-02-02", "2026-02-16", "2026-03-02")
+    ]
+    out = A.medication_adherence(planned, doses, "2026-01-01", "2026-03-31")
+    item = out["items"][0]
+    assert (item["expected"], item["logged"]) == (5.0, 5)
+    assert item["adherence_pct"] == 100.0
+
+
+def test_adherence_expected_uses_the_rate_when_a_schedule_has_no_grid():
+    planned = [
+        {
+            "kind": "supplement",
+            "substance": "creatine",
+            "schedule": "twice daily",
+            "started": "2026-01-01",
+            "stopped": "2026-01-03",
+        }
+    ]
+    out = A.medication_adherence(planned, [], "2026-01-01", "2026-01-03")
+    assert out["items"][0]["expected"] == 6.0
+
+
 def test_medication_adherence_ignores_symptoms_and_unplanned_doses():
     planned = [
         {
