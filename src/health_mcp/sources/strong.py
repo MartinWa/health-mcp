@@ -153,7 +153,21 @@ class StrongSource:
                 names.append(item)
             elif isinstance(item, dict) and (item.get("name") or item.get("key")):
                 names.append(str(item.get("name") or item.get("key")))
-        return difflib.get_close_matches(name, names, n=limit, cutoff=0.6)
+        # strong-data names carry the equipment in parentheses, so a typo of the
+        # movement alone ("Squatt") scores far below the cutoff against
+        # "Squat (Barbell)". Match the movement, return the full name.
+        wanted = name.casefold()
+        scored: list[tuple[float, str]] = []
+        for full in names:
+            core = re.sub(r"\s*\(.*?\)\s*$", "", full)
+            ratio = max(
+                difflib.SequenceMatcher(None, wanted, core.casefold()).ratio(),
+                difflib.SequenceMatcher(None, wanted, full.casefold()).ratio(),
+            )
+            if ratio >= 0.6:
+                scored.append((ratio, full))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        return [full for _, full in scored[:limit]]
 
     async def _get(
         self,

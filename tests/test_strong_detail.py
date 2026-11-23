@@ -494,7 +494,10 @@ def test_an_empty_exercise_result_suggests_nearby_names(tmp_path):
         if path == "/api/v1/exercises":
             return httpx.Response(
                 200,
-                json=envelope(count=3, items=["Squat", "Front Squat", "Bench Press"]),
+                json=envelope(
+                    count=3,
+                    items=["Squat (Barbell)", "Squat (Dumbbell)", "Bench Press (Barbell)"],
+                ),
             )
         return httpx.Response(200, json=envelope(count=0, items=[]))
 
@@ -508,5 +511,5 @@ def test_an_empty_exercise_result_suggests_nearby_names(tmp_path):
 
     out = run(go())
     assert out["total_points"] == 0
-    assert "Squat" in out["suggestions"]
+    assert out["suggestions"] == ["Squat (Barbell)", "Squat (Dumbbell)"]
     assert "suggestion_note" in out
