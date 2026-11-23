@@ -329,9 +329,17 @@ def test_optional_range_columns_are_validated(tmp_path):
     _, errors = P.read_events(write(tmp_path, "no-window.csv", no_window))
     assert errors == ["row 2: end_date is not YYYY-MM-DD"]
 
-    orphan_frequency = header + "2026-11-20,,medication,example-med,50,µg,,, ,7\n"
-    _, errors = P.read_events(write(tmp_path, "orphan.csv", orphan_frequency))
-    assert errors == ["row 2: every_days above 1 needs end_date"]
+    ongoing = header + "2026-11-20,,medication,example-med,50,µg,,,,7\n"
+    rows, errors = P.read_events(write(tmp_path, "ongoing.csv", ongoing))
+    assert errors == []
+    assert rows[0]["end_date"] == ""
+    assert rows[0]["every_days"] == 7
+
+    ongoing_note = header + "2026-11-20,,note,,,,,a note,,7\n"
+    _, errors = P.read_events(write(tmp_path, "ongoing-note.csv", ongoing_note))
+    assert errors == [
+        "row 2: every_days without end_date makes an ongoing series; only doses can be ongoing"
+    ]
 
     out_of_range = header + "2026-11-20,,medication,example-med,50,µg,,,2026-11-27,367\n"
     _, errors = P.read_events(write(tmp_path, "freq.csv", out_of_range))

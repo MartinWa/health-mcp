@@ -85,7 +85,8 @@ class EventsSource:
             if not day:
                 continue
             last = str(row.get("end_date") or day)
-            if day <= end and last >= start:
+            ongoing = not row.get("end_date") and bool(row.get("every_days"))
+            if day <= end and (last >= start or ongoing):
                 out.append(row)
         return out
 

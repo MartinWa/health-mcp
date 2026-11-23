@@ -359,6 +359,43 @@ def test_a_range_row_is_returned_for_every_period_it_overlaps(tmp_path):
     assert outside["n"] == 0
 
 
+def test_an_ongoing_row_covers_every_later_period(tmp_path):
+    text = (
+        "date,time,kind,substance,dose,unit,reason,notes,end_date,every_days\n"
+        "2026-11-01,,medication,example-med,50,µg,,,,7\n"
+    )
+    write_events(tmp_path, text)
+    source = build(tmp_path, settings_for(tmp_path))["events"]
+
+    later = run(source.get_medicine_logs("2026-12-01", "2026-12-31"))
+    assert later["events"]["valid"] is True
+    assert later["doses"][0]["count"] == 4
+    assert later["doses"][0]["first_date"] == "2026-12-06"
+
+    before = run(source.get_medicine_logs("2026-10-01", "2026-10-31"))
+    assert before["n"] == 0
+
+
+def test_adherence_counts_an_ongoing_row_through_the_query_window(tmp_path):
+    profile = VALID.replace(
+        "- {substance: example-med, dose: 50, unit: µg, schedule: daily}",
+        "- {substance: example-med, dose: 50, unit: µg, schedule: daily}",
+    )
+    write_profile(tmp_path, profile)
+    write_events(
+        tmp_path,
+        "date,time,kind,substance,dose,unit,reason,notes,end_date,every_days\n"
+        "2026-11-01,,medication,example-med,50,µg,,,,1\n",
+    )
+    out = run(
+        compose_medication_adherence(
+            build(tmp_path, settings_for(tmp_path)), "2026-11-01", "2026-11-10"
+        )
+    )
+    item = next(row for row in out["items"] if row["substance"] == "example-med")
+    assert (item["expected"], item["logged"]) == (10.0, 10)
+
+
 def test_adherence_end_to_end_with_a_plan_interval_and_a_range_row(tmp_path):
     profile = VALID.replace(
         "- {substance: example-med, dose: 50, unit: µg, schedule: daily}",
