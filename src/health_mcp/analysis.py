@@ -725,13 +725,17 @@ def strong_curve(curve: Any, max_points: int) -> dict[str, Any]:
 # -- profile and events ---------------------------------------------------
 
 
+def _normalize_schedule(schedule: str | None) -> str:
+    return " ".join((schedule or "").strip().lower().replace("-", " ").split())
+
+
 def schedule_per_day(schedule: str | None) -> float | None:
     """Interpret a free-text schedule conservatively; unknown text returns None.
 
     Only patterns whose meaning is unambiguous are accepted. A wrong guess here
     would produce a fake adherence number, which is worse than no number.
     """
-    text = " ".join((schedule or "").strip().lower().replace("-", " ").split())
+    text = _normalize_schedule(schedule)
     if not text:
         return None
     if text in {"daily", "every day", "once daily", "1x daily", "1 x daily"}:
@@ -752,15 +756,67 @@ def schedule_per_day(schedule: str | None) -> float | None:
     return None
 
 
-def _plan_window(plan: Mapping[str, Any], start: date, end: date) -> set[str]:
-    """The days one regimen row is in force inside the queried range."""
+def schedule_step(schedule: str | None) -> int | None:
+    """Days between single doses for a one-dose-per-interval schedule.
+
+    A daily, weekly or every-N-days regimen is a grid of single doses, so the
+    expected count can be taken from the same anchored grid the event rows use.
+    Schedules with more than one dose per day have no such grid and return None.
+    """
+    text = _normalize_schedule(schedule)
+    if text in {"daily", "every day", "once daily", "1x daily", "1 x daily"}:
+        return 1
+    if text in {"weekly", "once weekly", "1x weekly", "1 x weekly"}:
+        return 7
+    match = re.fullmatch(r"every\s+(\d+)\s+days?", text)
+    if match and int(match.group(1)) >= 1:
+        return int(match.group(1))
+    match = re.fullmatch(r"every\s+(\d+)\s+weeks?", text)
+    if match and int(match.group(1)) >= 1:
+        return 7 * int(match.group(1))
+    return None
+
+
+def _plan_bounds(plan: Mapping[str, Any], start: date, end: date) -> tuple[date, date] | None:
+    """The first and last day one regimen row is in force inside the range."""
     low, high = start, end
     if plan.get("started"):
         low = max(low, parse_date(str(plan["started"])))
     if plan.get("stopped"):
         high = min(high, parse_date(str(plan["stopped"])))
     if low > high:
+        return None
+    return low, high
+
+
+def _expected_doses(
+    plan: Mapping[str, Any], start: date, end: date, step: int | None, per_day: float
+) -> float:
+    """Doses one plan row expects inside the query window.
+
+    A single-dose-per-interval schedule is counted on the row's own anchored grid
+    (its `started` date, else the window's first day), because that is exactly how
+    the event rows are counted. Counting it as rate x days instead made a bounded
+    weekly course read above 100% whenever its last dose landed on the stop date.
+    """
+    bounds = _plan_bounds(plan, start, end)
+    if bounds is None:
+        return 0.0
+    low, high = bounds
+    if step is None:
+        return per_day * ((high - low).days + 1)
+    anchor = parse_date(str(plan["started"])) if plan.get("started") else low
+    offset = max((low - anchor).days, 0)
+    first = anchor + timedelta(days=offset - offset % step)
+    return float((high - first).days // step + 1)
+
+
+def _plan_window(plan: Mapping[str, Any], start: date, end: date) -> set[str]:
+    """The days one regimen row is in force inside the queried range."""
+    bounds = _plan_bounds(plan, start, end)
+    if bounds is None:
         return set()
+    low, high = bounds
     return {(low + timedelta(days=offset)).isoformat() for offset in range((high - low).days + 1)}
 
 
@@ -829,7 +885,9 @@ def medication_adherence(
             continue
         window = _plan_window(plan, start, end)
         group["per_day"] += per_day
-        group["expected"] += per_day * len(window)
+        group["expected"] += _expected_doses(
+            plan, start, end, schedule_step(plan.get("schedule")), per_day
+        )
         group["window"] |= window
         group["schedules"].append(plan.get("schedule"))
     items: list[dict[str, Any]] = []
@@ -895,10 +953,12 @@ def medication_adherence(
         "definition": (
             "Planned doses come from profile.yaml regimen (medication/supplement rows), "
             "grouped by kind and substance so each logged dose is counted once; a plan "
-            "row's started/stopped dates bound the days it is expected. Logged doses are "
-            "events.csv rows with kind medication or supplement; a row with end_date and "
-            "every_days covers every day it spans, so one row can stand for a daily "
-            "regimen. Groups with an uninterpreted schedule are listed in "
+            "row's started/stopped dates bound the days it is expected. Expected doses "
+            "are counted on each plan row's own grid (its started date, else the period "
+            "start), so a weekly course expects the same days its event rows count. "
+            "Logged doses are events.csv rows with kind medication or supplement; a row "
+            "with every_days covers every day it spans, so one row can stand for a "
+            "daily regimen. Groups with an uninterpreted schedule are listed in "
             "unparsed_schedules and excluded from the percentage. Symptom and note rows "
             "never count as doses."
         ),

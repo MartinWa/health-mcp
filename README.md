@@ -125,9 +125,12 @@ what they compute: `get_body` splits latest values from averaged vitals,
 `get_data_sources` merges devices, connections and per-type counts,
 `get_sleep_sessions` summarises sessions and naps (at most 25 rows),
 `get_consistency` reports logging percentages, missing days and streaks,
-`get_medication_adherence` compares the planned regimen with logged doses,
-`get_goal_progress` reads its target from `profile.yaml` (an explicit `target`
-is labelled as an override), `get_readiness` returns per-day inputs and no score,
+`get_medication_adherence` compares the planned regimen with logged doses —
+expected doses are counted on each plan row's own grid (its `started` date, else
+the period start), so a weekly course expects the same days its event rows count
+— and `get_goal_progress` reads its target from `profile.yaml` (an explicit
+`target` is labelled as an override), `get_readiness` returns per-day inputs and
+no score,
 `get_workload` flags weekly volume against its 4-week ACWR baseline, and
 `get_medicine_impact` compares same-day metrics — an association, not causality.
 Goal targets come from `profile.yaml`: `kg` and `lb` are converted and any other
