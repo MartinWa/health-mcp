@@ -511,5 +511,32 @@ def test_an_empty_exercise_result_suggests_nearby_names(tmp_path):
 
     out = run(go())
     assert out["total_points"] == 0
+    assert out["known_exercise"] is False
     assert out["suggestions"] == ["Squat (Barbell)", "Squat (Dumbbell)"]
-    assert "suggestion_note" in out
+    assert "not in the exercise list" in out["suggestion_note"]
+
+
+def test_a_known_exercise_without_sets_is_not_a_typo(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/exercises":
+            return httpx.Response(
+                200,
+                json=envelope(
+                    count=2,
+                    items=["Squat (Barbell)", "Bench Press (Barbell)"],
+                ),
+            )
+        return httpx.Response(200, json=envelope(count=0, items=[]))
+
+    source, client = make_source(tmp_path, handler)
+
+    async def go():
+        try:
+            return await source.get_exercise_detail("2026-01-01", "2026-01-31", "Squat (Barbell)")
+        finally:
+            await client.aclose()
+
+    out = run(go())
+    assert out["known_exercise"] is True
+    assert out["suggestions"] == []
+    assert "known, it just has no sets" in out["suggestion_note"]
