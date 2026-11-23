@@ -159,6 +159,24 @@ def test_adherence_expected_and_logged_agree_on_a_complete_weekly_course():
     assert item["adherence_pct"] == 100.0
 
 
+def test_adherence_expected_ignores_the_grid_cell_before_a_mid_grid_window():
+    planned = [
+        {
+            "kind": "medication",
+            "substance": "example-med",
+            "schedule": "weekly",
+            "started": "2026-01-05",
+            "stopped": "2026-02-23",
+        }
+    ]
+    one = A.medication_adherence(planned, [], "2026-01-08", "2026-01-18")
+    assert one["items"][0]["expected"] == 1.0
+    two = A.medication_adherence(planned, [], "2026-01-12", "2026-01-19")
+    assert two["items"][0]["expected"] == 2.0
+    outside = A.medication_adherence(planned, [], "2026-03-01", "2026-03-31")
+    assert outside["items"][0]["expected"] == 0.0
+
+
 def test_adherence_expected_uses_the_rate_when_a_schedule_has_no_grid():
     planned = [
         {
