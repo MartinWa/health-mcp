@@ -568,3 +568,25 @@ def test_weekly_volume_marks_weeks_clipped_by_the_requested_range():
     full = A.strong_summary(summary, weekly, start_date="2026-10-26", end_date="2026-11-08")
     assert [row["partial"] for row in full["weekly_volume"]] == [False, False]
     assert "weekly_partial_note" not in full
+
+
+def test_duplicate_workouts_from_two_devices_collapse():
+    df = pd.DataFrame(
+        {
+            "start_time": [
+                "2026-10-20T16:30:21+02:00",
+                "2026-10-20T16:30:21+02:00",
+                "2026-10-22T14:00:00+02:00",
+                "2026-10-23T14:00:30+02:00",
+            ],
+            "duration_seconds": [3645, 3645, 3000, 2400],
+            "type": ["strength_training", "strength_training", "walking", "walking"],
+        }
+    )
+    deduped, collapsed = A.dedupe_workouts(df)
+    assert collapsed == 1
+    assert len(deduped) == 3
+    stats = A.workout_stats(df, "Europe/Stockholm")
+    assert stats["count"] == 3
+    assert stats["duplicates_collapsed"] == 1
+    assert stats["by_type"] == {"walking": 2, "strength_training": 1}

@@ -175,6 +175,34 @@ def recovery_stats(df: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def dedupe_workouts(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Collapse the same workout imported from two devices.
+
+    Open Wearables stores one record per source, so a session synced from a watch
+    and a phone appears twice with an identical start time and a duration a few
+    seconds apart. Counting both inflates every session count, so records sharing
+    `type` and a start time truncated to the minute collapse to one.
+
+    Returns the frame and how many rows were dropped.
+    """
+    if df is None or len(df) == 0 or "start_time" not in df.columns:
+        return df, 0
+    work: Any = df.copy()
+    keys: list[Any] = []
+    if "type" in work.columns:
+        keys.append(work["type"].astype(str).str.lower())
+    else:
+        keys.append(pd.Series("", index=work.index))
+    keys.append(work["start_time"].astype(str).str.slice(0, 16))
+    work["_dedupe_key"] = keys[0].astype(str)
+    for key in keys[1:]:
+        work["_dedupe_key"] = work["_dedupe_key"] + "|" + key.astype(str)
+    before = len(work)
+    work = work.drop_duplicates(subset=["_dedupe_key"], keep="first")
+    work = work.drop(columns=["_dedupe_key"])
+    return work, before - len(work)
+
+
 def workout_stats(
     df: pd.DataFrame,
     tz: str,
@@ -186,6 +214,7 @@ def workout_stats(
     err = _need(df, ["start_time"])
     if err:
         return {"error": err}
+    df, collapsed = dedupe_workouts(df)
     d: Any = df.copy()
     d["_day"] = to_local_dates(d["start_time"], tz)
     durations: Any = (
@@ -201,6 +230,8 @@ def workout_stats(
         "count": len(d),
         "total_hours": round(float(minutes.sum()) / 60, 2),
     }
+    if collapsed:
+        total["duplicates_collapsed"] = collapsed
     if "type" in d.columns:
         counts: Any = d["type"].value_counts()
         total["by_type"] = {str(key): int(value) for key, value in counts.items()}
