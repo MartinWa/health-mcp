@@ -140,12 +140,17 @@ class StrongSource:
         slug = UNSAFE_CACHE_CHARS.sub("-", path.replace("/", "-")).strip("-")[:48] or "payload"
         return f"{slug}-{digest}"
 
-    async def _exercise_suggestions(self, name: str, limit: int = 5) -> list[str]:
-        """Nearest known exercise names, so a typo does not read as an untrained exercise."""
+    async def _exercise_lookup(self, name: str, limit: int = 5) -> tuple[bool, list[str]]:
+        """Whether the name exists in the exercise list, plus the nearest names.
+
+        A typo and a known-but-untrained exercise both produce an empty period, so
+        the answer has to say which one this is: `known` decides it, and the
+        suggestions are only meaningful when the name is not known.
+        """
         try:
             payload = await self._get("exercises", {}, lambda: self._client.exercises())
         except Exception:
-            return []
+            return False, []
         items = payload.get("items") if isinstance(payload, dict) else payload
         names: list[str] = []
         for item in items or []:
@@ -157,17 +162,20 @@ class StrongSource:
         # movement alone ("Squatt") scores far below the cutoff against
         # "Squat (Barbell)". Match the movement, return the full name.
         wanted = name.casefold()
+        known = any(full.casefold() == wanted for full in names)
+        if known:
+            return True, []
+        # Score the movement only: the parenthetical equipment is shared by many
+        # exercises, so including it makes "Squat" and "Bench Press" look alike.
+        wanted_core = re.sub(r"\s*\(.*?\)\s*$", "", wanted)
         scored: list[tuple[float, str]] = []
         for full in names:
-            core = re.sub(r"\s*\(.*?\)\s*$", "", full)
-            ratio = max(
-                difflib.SequenceMatcher(None, wanted, core.casefold()).ratio(),
-                difflib.SequenceMatcher(None, wanted, full.casefold()).ratio(),
-            )
+            core = re.sub(r"\s*\(.*?\)\s*$", "", full.casefold())
+            ratio = difflib.SequenceMatcher(None, wanted_core, core).ratio()
             if ratio >= 0.6:
                 scored.append((ratio, full))
         scored.sort(key=lambda item: (-item[0], item[1]))
-        return [full for _, full in scored[:limit]]
+        return False, [full for _, full in scored[:limit]]
 
     async def _get(
         self,
@@ -556,10 +564,14 @@ class StrongSource:
                 EXERCISE_RECORD_ROWS,
             )
             if out.get("total_points") == 0 and "error" not in out:
-                out["suggestions"] = await self._exercise_suggestions(name)
+                known, suggestions = await self._exercise_lookup(name)
+                out["known_exercise"] = known
+                out["suggestions"] = suggestions
                 out["suggestion_note"] = (
-                    "no sets matched this name; suggestions come from the exercise list, so a "
-                    "typo and an untrained exercise are told apart"
+                    "this exercise name is known, it just has no sets in the period"
+                    if known
+                    else "this name is not in the exercise list; the suggestions are the "
+                    "nearest known ones"
                 )
             out["period"] = {"start": start_date, "end": end_date}
             return out
