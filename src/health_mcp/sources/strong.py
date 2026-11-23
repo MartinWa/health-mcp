@@ -147,11 +147,12 @@ class StrongSource:
         except Exception:
             return []
         items = payload.get("items") if isinstance(payload, dict) else payload
-        names = [
-            str(item.get("name") or item.get("key"))
-            for item in (items or [])
-            if isinstance(item, dict) and (item.get("name") or item.get("key"))
-        ]
+        names: list[str] = []
+        for item in items or []:
+            if isinstance(item, str):
+                names.append(item)
+            elif isinstance(item, dict) and (item.get("name") or item.get("key")):
+                names.append(str(item.get("name") or item.get("key")))
         return difflib.get_close_matches(name, names, n=limit, cutoff=0.6)
 
     async def _get(

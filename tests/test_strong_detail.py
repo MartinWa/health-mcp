@@ -494,10 +494,7 @@ def test_an_empty_exercise_result_suggests_nearby_names(tmp_path):
         if path == "/api/v1/exercises":
             return httpx.Response(
                 200,
-                json=envelope(
-                    count=3,
-                    items=[{"name": "Squat"}, {"name": "Front Squat"}, {"name": "Bench Press"}],
-                ),
+                json=envelope(count=3, items=["Squat", "Front Squat", "Bench Press"]),
             )
         return httpx.Response(200, json=envelope(count=0, items=[]))
 
