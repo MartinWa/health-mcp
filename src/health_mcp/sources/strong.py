@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
 import json
 import re
@@ -126,6 +127,7 @@ class StrongSource:
             "error": str(exc),
             "source": self.NAME,
             "cache_age_hours": self.cache.namespace_age_hours(self.cache_namespace),
+            "cache_empty": self.cache.namespace_age_hours(self.cache_namespace) is None,
         }
 
     @staticmethod
@@ -137,6 +139,20 @@ class StrongSource:
         # Exercise names reach the path, so the slug must survive CacheStore.SAFE_NAME.
         slug = UNSAFE_CACHE_CHARS.sub("-", path.replace("/", "-")).strip("-")[:48] or "payload"
         return f"{slug}-{digest}"
+
+    async def _exercise_suggestions(self, name: str, limit: int = 5) -> list[str]:
+        """Nearest known exercise names, so a typo does not read as an untrained exercise."""
+        try:
+            payload = await self._get("exercises", {}, lambda: self._client.exercises())
+        except Exception:
+            return []
+        items = payload.get("items") if isinstance(payload, dict) else payload
+        names = [
+            str(item.get("name") or item.get("key"))
+            for item in (items or [])
+            if isinstance(item, dict) and (item.get("name") or item.get("key"))
+        ]
+        return difflib.get_close_matches(name, names, n=limit, cutoff=0.6)
 
     async def _get(
         self,
@@ -316,7 +332,9 @@ class StrongSource:
                     ),
                 ),
             )
-            out = A.strong_summary(summary, weekly, exercises, muscle)
+            out = A.strong_summary(
+                summary, weekly, exercises, muscle, start_date=start_date, end_date=end_date
+            )
             out["period"] = {"start": start_date, "end": end_date}
             return out
         except StrongDataError as exc:
@@ -522,6 +540,12 @@ class StrongSource:
                 max_points or self.settings.default_max_points,
                 EXERCISE_RECORD_ROWS,
             )
+            if out.get("total_points") == 0 and "error" not in out:
+                out["suggestions"] = await self._exercise_suggestions(name)
+                out["suggestion_note"] = (
+                    "no sets matched this name; suggestions come from the exercise list, so a "
+                    "typo and an untrained exercise are told apart"
+                )
             out["period"] = {"start": start_date, "end": end_date}
             return out
         except Exception as exc:

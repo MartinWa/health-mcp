@@ -90,7 +90,12 @@ where the stream carries nothing else.)
 All range tools take `start_date`/`end_date` as `YYYY-MM-DD`. They return
 aggregates by default and include a capped series only with `include_series=true`
 (plus `total_points` and `truncated`). `get_timeseries` takes ISO timestamps and
-a `resolution` level instead.
+a `resolution` level instead, and translates its type names to Open Wearables'
+own: `hrv` is `heart_rate_variability_rmssd`, `spo2` is `oxygen_saturation`,
+`calories` is `active_energy`, `temperature` is `body_temperature`; the response
+reports `types_requested` and `types_resolved`. **Sleep is not a timeseries
+type** in Open Wearables — `sleep` there is a 400, so use `get_sleep_summary` or
+`get_sleep_sessions`.
 
 | Source | Tools |
 | --- | --- |
@@ -107,35 +112,51 @@ registered whenever the server starts.
 `get_overview` and `get_daily_checkin` draw on both sources; without one they
 return the partial answer plus `"missing": [...]`, while
 `get_sleep_training_correlation` returns an error naming the missing source.
+A locally rejected argument (a reversed range, a range over 1830 days, an unknown
+`section`) answers `source: "local"` with a hint that no upstream call was made,
+and its message names both the requested span and the cap — an upstream failure
+keeps `source: openwearables`/`strong` and its `cache_age_hours`. In
+`get_status`, `cache_age_hours: null` means nothing is cached yet and the source
+block says so with `cache_empty: true`.
 A single Open Wearables block that fails (for example an upstream 500 on activity)
 is named in `missing` as `openwearables.<block>` and carries the upstream message
-in its `error` field, so a broken source never reads as "no data".
+in its `error` field, so a broken source never reads as "no data". A block whose
+page is capped is listed in `capped` (with `returned`/`has_more` and a note), which
+is a display limit, not a fetch ceiling — `fetch_truncated` keeps that meaning.
 `get_sleep_training_correlation` defaults to `lag_days=1` (lifting volume on day
 D vs sleep on D+1) and always reports `n`, `lag_days`, `definition` and
 `period`; `r` is added once there are at least three overlapping days.
 
 The lifting detail tools stay opt-in: `get_exercise_detail` returns one exercise's
-progress plus its best sets by rep count, `get_lifting_records` ranks estimated
+progress plus its best sets by rep count (an empty result also carries
+`suggestions` from the exercise list, so `Squatt` is told apart from a genuinely
+untrained exercise), `get_lifting_records` ranks estimated
 1RM (Epley) or bodyweight sets, `get_lifting_sets` returns raw sets capped at 200
 rows, and `get_yearly_progress` takes `year`/`as_of` instead of a date range and
 only fetches the cumulative curve with `include_curve=true`.
 
 The coaching tools (Tier C/D) are stateless wrappers over the same data and say
-what they compute: `get_body` splits latest values from averaged vitals,
+what they compute: `get_body` splits latest values from averaged vitals and says
+that the static fields carry no per-field timestamp upstream (`static_dating`;
+`get_weight_trend` has a dated series),
 `get_data_sources` merges devices, connections and per-type counts,
 `get_sleep_sessions` summarises sessions and naps (at most 25 rows),
 `get_consistency` reports logging percentages, missing days and streaks,
 `get_medication_adherence` compares the planned regimen with logged doses —
 expected doses are counted on each plan row's own grid (its `started` date, else
-the period start), so a weekly course expects the same days its event rows count
-— and `get_goal_progress` reads its target from `profile.yaml` (an explicit
-`target` is labelled as an override), `get_readiness` returns per-day inputs and
-no score,
+the period start), so a weekly course expects the same days its event rows count;
+`per_day` is `expected` spread over the requested period while
+`scheduled_per_day` is the regimen's own rate — and `get_goal_progress` reads its
+target from `profile.yaml` (an explicit `target` is labelled as an override),
+`get_readiness` returns per-day inputs and no score,
 `get_workload` flags weekly volume against its 4-week ACWR baseline, and
 `get_medicine_impact` compares same-day metrics — an association, not causality.
 Goal targets come from `profile.yaml`: `kg` and `lb` are converted and any other
-weight unit is rejected. When a local file is unreadable or missing, or an
-upstream fetch hits the page ceiling, the affected answer returns an error or an
+weight unit is rejected. `get_activity_summary` reports totals and averages for
+active minutes, distance and floors alongside steps and calories; `weekly_volume`
+in `get_lifting_summary` marks weeks the requested range clipped (`partial`), so
+a short first or last week is not read as a real drop. When a local file is
+unreadable or missing, or an upstream fetch hits the page ceiling, the affected answer returns an error or an
 `exact: false` warning instead of a quiet subset.
 
 Open Wearables answers a repeated cursor with `500` on some summary endpoints
@@ -189,12 +210,20 @@ Each section carries its own `updated:` so `get_status` can report staleness
 there instead of asking.
 
 `intent.program` takes `name`, and optionally `phase`, `started`,
-`deload_every_weeks` (1–52), `sessions_per_week` (1–14) and `progression` (free
-text). Frequency and progression are authored intent, not something the tools
+`deload_every_weeks` (1–52), `sessions_per_week` (1–14), `progression` (free
+text) and `workout_types` (normalized Open Wearables types such as
+`strength_training`). Frequency and progression are authored intent, not something the tools
 compute: compare `sessions_per_week` with the observed rate from
 `get_lifting_summary.sessions_per_week`. (`get_consistency` counts distinct
 workout **days** per source, so two sessions on one day count once — it answers
 "how regular was I", not "how many sessions per week".)
+
+`workout_types` scopes a `workouts` goal: without it, `get_goal_progress` counts
+**every** workout type, so a 76-session lifting target is compared against walks
+as well. With it, only those types count and the response echoes `counted_types`.
+A goal that carries `by:` also reports `target_period` and `target_applies`, so a
+2025 window against a 2026 target says it does not measure that goal instead of
+returning 882%.
 
 `events.csv` rows are typed by `kind`:
 

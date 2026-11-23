@@ -600,3 +600,125 @@ def test_overview_and_daily_report_a_truncated_block(tmp_path):
     assert overview["fetch_truncated"]["sleep"] is False
     assert daily["fetch_truncated"]["sleep"] is False
     assert daily["fetch_truncated"]["weight"] is False
+
+
+def test_timeseries_maps_friendly_names_to_upstream_series_types(tmp_path):
+    seen: dict[str, list[str]] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["types"] = request.url.params.get_list("types")
+        return httpx.Response(200, json=page([]))
+
+    source, client = make_source(tmp_path, handler)
+
+    async def go():
+        try:
+            return await source.get_timeseries(
+                ["hrv", "spo2", "calories", "temperature"], "2026-11-01", "2026-11-02", "1day"
+            )
+        finally:
+            await client.aclose()
+
+    out = run(go())
+    assert seen["types"] == [
+        "heart_rate_variability_rmssd",
+        "oxygen_saturation",
+        "active_energy",
+        "body_temperature",
+    ]
+    assert out["types_requested"] == ["hrv", "spo2", "calories", "temperature"]
+    assert out["types_resolved"] == seen["types"]
+
+
+def test_a_local_validation_error_is_not_tagged_as_an_upstream_failure(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("a locally rejected range must not reach upstream")
+
+    source, client = make_source(tmp_path, handler)
+
+    async def go():
+        try:
+            return await source.get_weight_trend("2026-02-01", "2026-01-01")
+        finally:
+            await client.aclose()
+
+    out = run(go())
+    assert "is after end_date" in out["error"]
+    assert out["source"] == "local"
+    assert "cache_age_hours" not in out
+    assert "no upstream call" in out["hint"]
+
+
+def test_workout_count_filters_to_the_declared_types(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=page(
+                [
+                    {"start_time": "2026-11-01T10:00:00Z", "type": "walking"},
+                    {"start_time": "2026-11-02T18:00:00Z", "type": "strength_training"},
+                    {"start_time": "2026-11-03T18:00:00Z", "type": "Strength_Training"},
+                ]
+            ),
+        )
+
+    source, client = make_source(tmp_path, handler)
+
+    async def go():
+        try:
+            all_types = await source.workout_count("2026-11-01", "2026-11-03")
+            lifting = await source.workout_count("2026-11-01", "2026-11-03", ["strength_training"])
+        finally:
+            await client.aclose()
+        return all_types, lifting
+
+    (everything, truncated), (filtered, filtered_truncated) = run(go())
+    assert everything == 3
+    assert filtered == 2
+    assert truncated is False and filtered_truncated is False
+
+
+def test_overview_marks_a_capped_workout_page(tmp_path):
+    rows = [
+        {"start_time": f"2026-11-{day:02d}T18:00:00Z", "type": "strength_training"}
+        for day in range(1, 8)
+        for _ in range(9)
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "workouts" in request.url.path:
+            return httpx.Response(200, json=page(rows))
+        return httpx.Response(200, json=page([]))
+
+    source, client = make_source(tmp_path, handler)
+
+    async def go():
+        try:
+            return await source.overview("2026-11-01", "2026-11-30")
+        finally:
+            await client.aclose()
+
+    out = run(go())
+    assert out["workouts"]["has_more"] is True
+    assert out["workouts"]["returned"] == 50
+    assert out["capped"] == ["workouts"]
+    assert "capped page" in out["capped_note"]
+
+
+def test_source_status_flags_an_empty_cache(tmp_path):
+    source, client = make_source(
+        tmp_path,
+        lambda request: httpx.Response(
+            200, json={"id": "user-1", "username": "synthetic", "contract_version": "1.0.0"}
+        ),
+    )
+
+    async def go():
+        try:
+            return await source.status()
+        finally:
+            await client.aclose()
+
+    out = run(go())
+    assert out["cache_age_hours"] is None
+    assert out["cache_empty"] is True

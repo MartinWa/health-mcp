@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Sequence
 from typing import Annotated, Any, ClassVar, Literal
 
 import pandas as pd
@@ -24,7 +25,6 @@ TsType = Literal[
     "heart_rate",
     "steps",
     "weight",
-    "sleep",
     "hrv",
     "spo2",
     "calories",
@@ -32,6 +32,20 @@ TsType = Literal[
     "respiratory_rate",
     "temperature",
 ]
+# Friendly tool names -> Open Wearables `SeriesType` values (from the live
+# /openapi.json, 141 entries). `sleep` is deliberately absent: OW serves sleep
+# through /summaries/sleep, so it is not a timeseries type at all.
+TS_ALIASES: dict[TsType, str] = {
+    "heart_rate": "heart_rate",
+    "steps": "steps",
+    "weight": "weight",
+    "hrv": "heart_rate_variability_rmssd",
+    "spo2": "oxygen_saturation",
+    "calories": "active_energy",
+    "distance": "distance",
+    "respiratory_rate": "respiratory_rate",
+    "temperature": "body_temperature",
+}
 Resolution = Literal["raw", "1min", "5min", "15min", "1hour", "1day", "1week", "1month"]
 
 EXPOSURE: dict[str, frozenset[str]] = {
@@ -85,6 +99,12 @@ class OpenWearablesSource:
         return self.cache.refresh(self.cache_namespace)
 
     def _error(self, exc: BaseException) -> dict[str, Any]:
+        if isinstance(exc, ValueError):
+            return {
+                "error": str(exc),
+                "source": "local",
+                "hint": "rejected by local validation; no upstream call was made",
+            }
         return {
             "error": str(exc),
             "source": self.NAME,
@@ -97,6 +117,7 @@ class OpenWearablesSource:
             "source": self.NAME,
             "base_url": self._client.base_url,
             "cache_age_hours": self.cache.namespace_age_hours(self.cache_namespace),
+            "cache_empty": self.cache.namespace_age_hours(self.cache_namespace) is None,
         }
         try:
             user = await self._client.user(self.user_id)
@@ -159,14 +180,24 @@ class OpenWearablesSource:
             lambda a, b: self._client.recovery(self.user_id, a, b),
         )
 
-    async def _workouts_df(self, start: str, end: str) -> tuple[pd.DataFrame, bool]:
-        return await self._cached_df(
+    async def _workouts_df(
+        self, start: str, end: str, types: Sequence[str] | None = None
+    ) -> tuple[pd.DataFrame, bool]:
+        frame, truncated = await self._cached_df(
             "workouts",
             start,
             end,
             "start_time",
             lambda a, b: self._client.workouts(self.user_id, a, b),
         )
+        frame_any: Any = frame
+        if not types or frame_any is None or "type" not in frame_any.columns:
+            return frame, truncated
+        wanted = {str(item).strip().lower() for item in types if str(item).strip()}
+        filtered: pd.DataFrame = frame_any[
+            frame_any["type"].astype(str).str.lower().isin(wanted)
+        ].copy()
+        return filtered, truncated
 
     async def _weight_df(self, start: str, end: str) -> tuple[pd.DataFrame, bool]:
         key = f"weight-{start}_{end}"
@@ -252,6 +283,13 @@ class OpenWearablesSource:
             out[block].pop("series_included", None)
             out[block].pop("total_points", None)
         out["fetch_truncated"] = truncated
+        capped = [name for name in ("workouts",) if out[name].get("has_more")]
+        if capped:
+            out["capped"] = capped
+            out["capped_note"] = (
+                "the block lists a capped page; returned/has_more say how much is missing, "
+                "while the block's own count covers the whole period"
+            )
         for block, message in errors.items():
             out[block]["error"] = message
         if errors:
@@ -506,7 +544,13 @@ class OpenWearablesSource:
         types: Annotated[
             list[TsType],
             Field(
-                description="Series types, e.g. ['heart_rate','steps']",
+                description=(
+                    "Series types: heart_rate, steps, weight, "
+                    "hrv (-> heart_rate_variability_rmssd), "
+                    "spo2 (-> oxygen_saturation), calories (-> active_energy), distance, "
+                    "respiratory_rate, temperature (-> body_temperature). Sleep is not a "
+                    "timeseries type; use get_sleep_summary or get_sleep_sessions."
+                ),
                 min_length=1,
                 max_length=10,
             ),
@@ -528,8 +572,9 @@ class OpenWearablesSource:
     ) -> dict[str, Any]:
         """Granular biometric series. Prefer 1day/1hour to bound tokens; fetch is capped."""
         try:
+            resolved = [TS_ALIASES[item] for item in types]
             page = await self._client.timeseries(
-                self.user_id, start_time, end_time, list(types), resolution
+                self.user_id, start_time, end_time, resolved, resolution
             )
             frame = pd.json_normalize(page.rows) if page.rows else pd.DataFrame()
             stats = A.timeseries_stats(frame)
@@ -538,6 +583,8 @@ class OpenWearablesSource:
                 resolution=resolution,
                 fetch_truncated=page.truncated,
                 pages=page.pages,
+                types_requested=list(types),
+                types_resolved=resolved,
             )
             return stats
         except Exception as exc:
@@ -683,8 +730,10 @@ class OpenWearablesSource:
         ]
         return points, truncated
 
-    async def workout_count(self, start: str, end: str) -> tuple[int, bool]:
-        frame, truncated = await self._workouts_df(start, end)
+    async def workout_count(
+        self, start: str, end: str, types: Sequence[str] | None = None
+    ) -> tuple[int, bool]:
+        frame, truncated = await self._workouts_df(start, end, types)
         return (0 if frame is None else len(frame)), truncated
 
     async def daily_metrics(

@@ -145,6 +145,8 @@ async def compose_overview(
             "recovery",
             "workouts",
             "logging",
+            "capped",
+            "capped_note",
             "fetch_truncated",
         ):
             out[key] = block.get(key)
@@ -373,6 +375,32 @@ async def compose_goal_progress(
                 "the profile is currently invalid; the goal comes from the last valid copy"
             )
     deadline = goal.by.isoformat() if goal is not None and goal.by is not None else None
+    current = profile_source.current() if profile_source is not None else None
+    intent = current.intent if current is not None else None
+    program = intent.program if intent is not None else None
+    counted_types = program.workout_types if program is not None else None
+    target_period: dict[str, Any] | None = None
+    target_applies: bool | None = None
+    if goal is not None and goal.by is not None:
+        period_start = date(goal.by.year, 1, 1)
+        target_period = {
+            "start": period_start.isoformat(),
+            "end": goal.by.isoformat(),
+            "days": (goal.by - period_start).days + 1,
+        }
+        window_start, window_end = validate_range(start_date, end_date)
+        target_applies = window_start >= period_start and window_end <= goal.by
+        if not target_applies:
+            warnings.append(
+                f"the profile goal applies to {target_period['start']}..{target_period['end']}; "
+                f"this window falls outside it, so progress_pct does not measure that goal"
+            )
+        elif (window_end - window_start).days + 1 < int(target_period["days"]):
+            warnings.append(
+                f"the goal target covers {target_period['days']} days "
+                f"({target_period['start']}..{target_period['end']}); this window covers "
+                f"{(window_end - window_start).days + 1} days"
+            )
     try:
         if metric == "weight":
             points, truncated = await openwearables.weight_points(start_date, end_date)
@@ -390,10 +418,24 @@ async def compose_goal_progress(
             )
             out["fetch_truncated"] = {"weight": False}
         else:
-            sessions, truncated = await openwearables.workout_count(start_date, end_date)
+            if metric == "workouts" and counted_types:
+                warnings.append(
+                    "sessions counts only the declared workout types "
+                    f"({', '.join(counted_types)}) from program.workout_types"
+                )
+            elif metric == "workouts":
+                warnings.append(
+                    "the profile program declares no workout_types, so every workout type "
+                    "counts against this target; set program.workout_types to scope it"
+                )
+            sessions, truncated = await openwearables.workout_count(
+                start_date, end_date, counted_types
+            )
             out = A.workout_goal_progress(
                 sessions, resolved, target_source=target_source, deadline=deadline
             )
+            if counted_types:
+                out["counted_types"] = list(counted_types)
             out["fetch_truncated"] = {"workouts": truncated}
             if truncated:
                 out["exact"] = False
@@ -406,6 +448,9 @@ async def compose_goal_progress(
         return {"error": str(exc), "source": "openwearables"}
     out["profile_metric"] = goal.metric if goal is not None else None
     out["target_original"] = target_original
+    if target_period is not None:
+        out["target_period"] = target_period
+        out["target_applies"] = target_applies
     if profile_health is not None:
         out["profile"] = profile_health
     out["period"] = {"start": start_date, "end": end_date}

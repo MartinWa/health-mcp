@@ -36,8 +36,12 @@ def validate_range(start_date: str, end_date: str) -> tuple[date, date]:
     start, end = parse_date(start_date), parse_date(end_date)
     if start > end:
         raise ValueError(f"start_date {start_date} is after end_date {end_date}")
-    if (end - start).days > MAX_RANGE_DAYS:
-        raise ValueError("Date range too large (max 1830 days)")
+    span_days = (end - start).days + 1
+    if span_days > MAX_RANGE_DAYS:
+        raise ValueError(
+            f"Date range too large: {start_date}..{end_date} spans {span_days} days "
+            f"(max {MAX_RANGE_DAYS})"
+        )
     return start, end
 
 

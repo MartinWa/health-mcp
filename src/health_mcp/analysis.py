@@ -74,6 +74,8 @@ def weight_stats(df: pd.DataFrame) -> dict[str, Any]:
     if err:
         return {"error": err}
     d = df.dropna(subset=["weight_kg"]).sort_values("date")
+    samples = len(d)
+    d = d.drop_duplicates(subset=["date"], keep="last")
     if len(d) < 2:
         return {"error": "Need at least 2 weight points"}
     values: Any = d["weight_kg"]
@@ -87,6 +89,8 @@ def weight_stats(df: pd.DataFrame) -> dict[str, Any]:
         "min_kg": round(float(values.min()), 2),
         "max_kg": round(float(values.max()), 2),
         "points": len(d),
+        "samples": samples,
+        "samples_collapsed": samples - len(d),
         "dates": _dates(d, "date"),
         "values": [round(float(value), 2) for value in values.tolist()],
     }
@@ -121,7 +125,7 @@ def activity_stats(df: pd.DataFrame) -> dict[str, Any]:
     if err:
         return {"error": err}
     steps: Any = df["steps"]
-    return {
+    out: dict[str, Any] = {
         "avg_steps": int(steps.mean()),
         "avg_active_kcal": safe_mean(df["active_calories_kcal"])
         if "active_calories_kcal" in df.columns
@@ -133,6 +137,24 @@ def activity_stats(df: pd.DataFrame) -> dict[str, Any]:
         "dates": _dates(df, "date"),
         "steps": [int(value) if pd.notna(value) else None for value in steps.tolist()],
     }
+    for column, key, scale in [
+        ("active_minutes", "total_active_minutes", 1),
+        ("active_minutes", "avg_active_minutes", 1),
+        ("sedentary_minutes", "avg_sedentary_minutes", 1),
+        ("distance_meters", "total_distance_km", 1 / 1000),
+        ("distance_meters", "avg_distance_km", 1 / 1000),
+        ("floors_climbed", "total_floors", 1),
+    ]:
+        if column not in df.columns:
+            continue
+        series: Any = pd.to_numeric(df[column], errors="coerce")
+        series = series.dropna()
+        if len(series) == 0:
+            continue
+        value = float(series.sum()) if key.startswith("total_") else float(series.mean())
+        out[key] = round(value * scale, 2 if scale != 1 else 1)
+    out["days_with_activity"] = len(df)
+    return out
 
 
 def recovery_stats(df: pd.DataFrame) -> dict[str, Any]:
@@ -378,6 +400,9 @@ def strong_summary(
     weekly: Any = None,
     exercises: Any = None,
     muscle: Any = None,
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(summary, dict) or "volume_kg" not in summary:
         return {"error": "No lifting data in this period", "sessions": 0}
@@ -408,16 +433,31 @@ def strong_summary(
         {"muscle": item.get("key"), "volume_kg": round(float(item.get("volume_kg") or 0), 1)}
         for item in _items(muscle)
     ]
-    weeks = [
-        {
-            "week_start": item.get("bucket_start"),
+    weeks = []
+    for item in _items(weekly):
+        bucket = item.get("bucket_start")
+        entry: dict[str, Any] = {
+            "week_start": bucket,
             "volume_kg": round(float(item.get("value") or 0), 1),
             "moving_avg_4w": item.get("value_4wma"),
         }
-        for item in _items(weekly)
-    ]
+        if bucket and start_date and end_date:
+            try:
+                week_start = parse_date(str(bucket)[:10])
+                entry["partial"] = week_start < parse_date(start_date) or (
+                    week_start + timedelta(days=6)
+                ) > parse_date(end_date)
+            except ValueError:
+                entry["partial"] = None
+        weeks.append(entry)
     out["weekly_truncated"] = len(weeks) > WEEKS_IN_YEAR
     out["weekly_volume"] = weeks[-WEEKS_IN_YEAR:]
+    if any(entry.get("partial") for entry in out["weekly_volume"]):
+        out["weekly_partial_note"] = (
+            "partial marks a week clipped by the requested range, so its volume is not "
+            "comparable with a complete week; equal totals in different weeks are real "
+            "when the same sessions repeat"
+        )
     out["contract_version"] = summary.get("contract_version")
     out["generated_at"] = summary.get("generated_at")
     return out
@@ -460,7 +500,15 @@ def strong_breakdown(breakdown: Any, dimension: str) -> dict[str, Any]:
                 "share_pct": round(100 * volume / total_volume, 1) if total_volume else 0.0,
             }
         )
-    return {"dimension": dimension, "count": len(rows), "items": rows}
+    out: dict[str, Any] = {"dimension": dimension, "count": len(rows), "items": rows}
+    if dimension == "muscle":
+        out["sessions_are_summed_per_exercise"] = True
+        out["note"] = (
+            "sessions sums each exercise's session count, so one session training two "
+            "exercises of the same muscle group counts twice; compare groups by volume_kg "
+            "or share_pct, not by sessions"
+        )
+    return out
 
 
 def strong_sessions(page: Any) -> dict[str, Any]:
@@ -930,7 +978,8 @@ def medication_adherence(
             "schedules": group["schedules"],
             "doses": group["doses"],
             "units": sorted(group["units"]),
-            "per_day": round(group["per_day"], 3),
+            "per_day": round(expected / days, 3) if days else None,
+            "scheduled_per_day": round(group["per_day"], 3),
             "expected": round(expected, 1),
             "logged": logged,
             "adherence_pct": round(100 * logged / expected, 1) if expected else None,
@@ -964,7 +1013,9 @@ def medication_adherence(
             "start), so a weekly course expects the same days its event rows count. "
             "Logged doses are events.csv rows with kind medication or supplement; a row "
             "with every_days covers every day it spans, so one row can stand for a "
-            "daily regimen. Groups with an uninterpreted schedule are listed in "
+            "daily regimen. per_day is expected spread over the requested period, while "
+            "scheduled_per_day is the regimen's own rate per day. Groups with an "
+            "uninterpreted schedule are listed in "
             "unparsed_schedules and excluded from the percentage. Symptom and note rows "
             "never count as doses."
         ),
@@ -1022,6 +1073,13 @@ def body_summary(payload: Any) -> dict[str, Any]:
             "body_temperature_measured_at": latest.get("body_temperature_measured_at"),
         },
         "source": {"provider": source.get("provider"), "device_name": source.get("device_name")},
+        "static_measured_at": None,
+        "static_dating": (
+            "Open Wearables returns the static body fields without a per-field timestamp, "
+            "so their age cannot be read from this payload; get_weight_trend serves a dated "
+            "weight series. Body temperature and skin temperature do carry measured_at under "
+            "latest."
+        ),
         "definition": (
             "static is the most recent value per field; averaged covers "
             "average_period days; latest only appears when measured inside "
@@ -1379,8 +1437,11 @@ def workout_goal_progress(
     *,
     target_source: str,
     deadline: str | None = None,
+    counted_types: Sequence[str] | None = None,
+    target_applies: bool | None = None,
+    target_period: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    out: dict[str, Any] = {
         "metric": "workouts",
         "sessions": sessions,
         "target": target,
@@ -1388,11 +1449,21 @@ def workout_goal_progress(
         "remaining": max(round(target - sessions, 1), 0.0),
         "progress_pct": round(100 * sessions / target, 1) if target else None,
         "deadline": deadline,
-        "definition": (
-            "sessions counts every workout in the period; the target comes from the "
-            "profile goal for the workouts metric (or an explicit override)."
-        ),
     }
+    if counted_types is not None:
+        out["counted_types"] = list(counted_types)
+    if target_applies is not None:
+        out["target_applies"] = target_applies
+    if target_period is not None:
+        out["target_period"] = dict(target_period)
+    out["definition"] = (
+        "sessions counts the workout types the profile program declares "
+        "(program.workout_types) when it declares any, and every workout type otherwise; "
+        "the target comes from the profile goal for the workouts metric (or an explicit "
+        "override). target_applies is false when the window falls outside the goal's "
+        "period, so the percentage is not a measure of that goal."
+    )
+    return out
 
 
 def medicine_logs(
