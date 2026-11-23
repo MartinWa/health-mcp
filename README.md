@@ -153,7 +153,10 @@ target from `profile.yaml` (an explicit `target` is labelled as an override),
 `get_medicine_impact` compares same-day metrics — an association, not causality.
 Goal targets come from `profile.yaml`: `kg` and `lb` are converted and any other
 weight unit is rejected. `get_activity_summary` reports totals and averages for
-active minutes, distance and floors alongside steps and calories; `weekly_volume`
+active minutes, distance and floors alongside steps and calories; Workout counts also collapse the same
+session imported from two devices (identical type and start time to the minute),
+reported as `duplicates_collapsed` — Open Wearables stores one record per source,
+so an uncollapsed count double-counts a synced session. `weekly_volume`
 in `get_lifting_summary` marks weeks the requested range clipped (`partial`), so
 a short first or last week is not read as a real drop. When a local file is
 unreadable or missing, or an upstream fetch hits the page ceiling, the affected answer returns an error or an

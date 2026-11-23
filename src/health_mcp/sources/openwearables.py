@@ -734,7 +734,10 @@ class OpenWearablesSource:
         self, start: str, end: str, types: Sequence[str] | None = None
     ) -> tuple[int, bool]:
         frame, truncated = await self._workouts_df(start, end, types)
-        return (0 if frame is None else len(frame)), truncated
+        if frame is None or len(frame) == 0:
+            return 0, truncated
+        deduped, _ = A.dedupe_workouts(frame)
+        return len(deduped), truncated
 
     async def daily_metrics(
         self, start: str, end: str

@@ -680,9 +680,9 @@ def test_workout_count_filters_to_the_declared_types(tmp_path):
 
 def test_overview_marks_a_capped_workout_page(tmp_path):
     rows = [
-        {"start_time": f"2026-11-{day:02d}T18:00:00Z", "type": "strength_training"}
-        for day in range(1, 8)
-        for _ in range(9)
+        {"start_time": f"2026-11-{day:02d}T{hour:02d}:00:00Z", "type": "strength_training"}
+        for day in range(1, 4)
+        for hour in range(0, 24)
     ]
 
     def handler(request: httpx.Request) -> httpx.Response:
