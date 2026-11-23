@@ -808,6 +808,12 @@ def _expected_doses(
     anchor = parse_date(str(plan["started"])) if plan.get("started") else low
     offset = max((low - anchor).days, 0)
     first = anchor + timedelta(days=offset - offset % step)
+    if first < low:
+        # The grid cell at or before `low` is outside the window;`event_days` skips
+        # it for logged rows, so the count has to skip it too.
+        first += timedelta(days=step)
+    if first > high:
+        return 0.0
     return float((high - first).days // step + 1)
 
 
