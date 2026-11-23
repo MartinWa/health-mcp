@@ -399,3 +399,28 @@ def test_regimen_intervals_are_optional_and_ordered(tmp_path):
     assert profile is None
     assert errors[0].startswith("regimen.medications[0]")
     assert "stopped is before started" in errors[0]
+
+
+def test_program_workout_types_are_normalized_and_reach_the_digest(tmp_path):
+    text = VALID.replace(
+        "    deload_every_weeks: 5",
+        "    deload_every_weeks: 5\n    workout_types: ['Strength Training', 'elliptical']",
+    )
+    profile, errors = P.read(write(tmp_path, "program.yaml", text))
+    assert errors == []
+    assert profile is not None
+    assert profile.intent is not None
+    assert profile.intent.program is not None
+    assert profile.intent.program.workout_types == ["strength_training", "elliptical"]
+    digest = P.intent_digest(profile.intent)
+    assert "counts strength_training, elliptical" in digest
+
+
+def test_program_workout_types_reject_a_non_normalized_token(tmp_path):
+    text = VALID.replace(
+        "    deload_every_weeks: 5",
+        "    deload_every_weeks: 5\n    workout_types: ['strength training!']",
+    )
+    profile, errors = P.read(write(tmp_path, "program.yaml", text))
+    assert profile is None
+    assert errors[0].startswith("intent.program.workout_types:")

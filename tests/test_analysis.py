@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pandas as pd
 from helpers import envelope
 
 from health_mcp import analysis as A
@@ -468,3 +469,102 @@ def test_medicine_impact_exposure_follows_the_covered_days():
     assert entry["days_with"] == 4
     assert entry["metrics"]["sleep_hours"]["n_with"] == 4
     assert entry["metrics"]["sleep_hours"]["n_without"] == 3
+
+
+def test_weight_stats_collapses_repeated_samples_per_day():
+    df = pd.DataFrame(
+        {
+            "date": ["2026-11-01", "2026-11-01", "2026-11-02", "2026-11-02", "2026-11-02"],
+            "_local_date": pd.to_datetime(
+                ["2026-11-01", "2026-11-01", "2026-11-02", "2026-11-02", "2026-11-02"]
+            ),
+            "weight_kg": [80.0, 80.4, 80.4, 80.8, 80.6],
+        }
+    )
+    out = A.weight_stats(df)
+    assert out["points"] == 2
+    assert out["samples"] == 5
+    assert out["samples_collapsed"] == 3
+    assert out["dates"] == ["2026-11-01", "2026-11-02"]
+    assert out["values"] == [80.4, 80.6]
+
+
+def test_activity_stats_reports_minutes_distance_and_floors():
+    df = pd.DataFrame(
+        {
+            "date": ["2026-11-01", "2026-11-02"],
+            "_local_date": pd.to_datetime(["2026-11-01", "2026-11-02"]),
+            "steps": [10000, 5000],
+            "active_minutes": [40, 20],
+            "sedentary_minutes": [600, 700],
+            "distance_meters": [8000.0, 4000.0],
+            "floors_climbed": [10, 4],
+        }
+    )
+    out = A.activity_stats(df)
+    assert out["total_active_minutes"] == 60.0
+    assert out["avg_active_minutes"] == 30.0
+    assert out["total_distance_km"] == 12.0
+    assert out["avg_distance_km"] == 6.0
+    assert out["total_floors"] == 14.0
+    assert out["avg_sedentary_minutes"] == 650.0
+
+
+def test_adherence_per_day_matches_expected_over_the_window():
+    planned = [
+        {
+            "kind": "medication",
+            "substance": "example-med",
+            "schedule": "every 14 days",
+            "started": "2026-01-05",
+            "stopped": "2026-03-02",
+        }
+    ]
+    doses = [
+        {"date": "2026-01-05", "kind": "medication", "substance": "example-med"},
+        {"date": "2026-01-19", "kind": "medication", "substance": "example-med"},
+    ]
+    out = A.medication_adherence(planned, doses, "2026-01-05", "2026-02-03")
+    item = out["items"][0]
+    assert item["expected"] == 3.0
+    assert item["per_day"] == round(3.0 / 30, 3)
+    assert item["scheduled_per_day"] == round(1 / 14, 3)
+
+
+def test_body_summary_states_that_static_fields_carry_no_date():
+    out = A.body_summary(
+        {"slow_changing": {"weight_kg": 80.0, "height_cm": 180}, "latest": {}, "source": {}}
+    )
+    assert out["static"]["weight_kg"] == 80.0
+    assert out["static_measured_at"] is None
+    assert "get_weight_trend" in out["static_dating"]
+
+
+def test_muscle_breakdown_flags_summed_sessions():
+    payload = {
+        "items": [
+            {"key": "legs", "sessions": 11, "sets": 40, "volume_kg": 800.0},
+            {"key": "core", "sessions": 22, "sets": 10, "volume_kg": 200.0},
+        ]
+    }
+    out = A.strong_breakdown(payload, "muscle")
+    assert out["sessions_are_summed_per_exercise"] is True
+    assert "compare groups by volume_kg" in out["note"]
+    assert A.strong_breakdown(payload, "exercise").get("sessions_are_summed_per_exercise") is None
+
+
+def test_weekly_volume_marks_weeks_clipped_by_the_requested_range():
+    weekly = {
+        "items": [
+            {"bucket_start": "2026-10-26", "value": 100.0},
+            {"bucket_start": "2026-11-02", "value": 200.0},
+        ]
+    }
+    summary = {"volume_kg": 300.0, "sessions": 2, "sets": 10, "hours": 2}
+    out = A.strong_summary(summary, weekly, start_date="2026-10-28", end_date="2026-11-05")
+    rows = out["weekly_volume"]
+    assert [row["partial"] for row in rows] == [True, True]
+    assert "partial marks a week clipped" in out["weekly_partial_note"]
+    full = A.strong_summary(summary, weekly, start_date="2026-10-26", end_date="2026-11-08")
+    assert [row["partial"] for row in full["weekly_volume"]] == [False, False]
+    assert "weekly_partial_note" not in full

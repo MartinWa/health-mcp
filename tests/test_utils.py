@@ -25,8 +25,10 @@ def test_parse_date_is_strict():
 def test_validate_range_rejects_reversed_and_too_long():
     with pytest.raises(ValueError, match="after end_date"):
         validate_range("2026-02-01", "2026-01-01")
-    with pytest.raises(ValueError, match="too large"):
+    with pytest.raises(ValueError, match="too large") as excinfo:
         validate_range("2019-01-01", "2026-01-02")
+    assert "spans 2559 days" in str(excinfo.value)
+    assert "max 1830" in str(excinfo.value)
 
 
 def test_date_only_values_are_not_shifted_by_tz():

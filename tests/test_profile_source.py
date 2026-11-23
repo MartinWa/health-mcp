@@ -417,3 +417,20 @@ def test_adherence_end_to_end_with_a_plan_interval_and_a_range_row(tmp_path):
     assert (item["expected"], item["logged"]) == (5.0, 5)
     assert item["missing_days"] == 0
     assert item["intervals"] == [{"started": "2026-11-18", "stopped": "2026-11-22"}]
+
+
+def test_an_unfiltered_profile_call_lists_the_sections_it_returned(tmp_path):
+    write_profile(tmp_path)
+    write_events(tmp_path)
+    settings = make_settings(tmp_path, profile_dir=str(tmp_path / "profile"))
+    out = run(compose_profile(build(tmp_path, settings), settings))
+    assert out["profile"]["sections_present"] == [
+        "constraints",
+        "intent",
+        "notes",
+        "regimen",
+    ]
+    assert "pass section=" in out["profile"]["sections_note"]
+    one = run(compose_profile(build(tmp_path, settings), settings, "intent"))
+    assert list(one["profile"]["sections"]) == ["intent"]
+    assert "sections_present" not in one["profile"]

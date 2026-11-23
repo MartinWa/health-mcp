@@ -486,3 +486,30 @@ def test_cache_keys_stay_safe_for_exercise_names(tmp_path):
     key = StrongSource._key("exercises/Back Squat (barbell)/progress", {"start": "2026-01-01"})
     assert SAFE_NAME.match(key)
     assert " " not in key and "(" not in key
+
+
+def test_an_empty_exercise_result_suggests_nearby_names(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/exercises":
+            return httpx.Response(
+                200,
+                json=envelope(
+                    count=3,
+                    items=[{"name": "Squat"}, {"name": "Front Squat"}, {"name": "Bench Press"}],
+                ),
+            )
+        return httpx.Response(200, json=envelope(count=0, items=[]))
+
+    source, client = make_source(tmp_path, handler)
+
+    async def go():
+        try:
+            return await source.get_exercise_detail("2026-01-01", "2026-01-31", "Squatt")
+        finally:
+            await client.aclose()
+
+    out = run(go())
+    assert out["total_points"] == 0
+    assert "Squat" in out["suggestions"]
+    assert "suggestion_note" in out

@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import re
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime
@@ -22,7 +23,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 BACKUP_KEEP = 10
 EVENT_COLUMNS = (
@@ -72,6 +73,26 @@ class Program(_Model):
     deload_every_weeks: Annotated[int | None, Field(ge=1, le=52)] = None
     sessions_per_week: Annotated[int | None, Field(ge=1, le=14)] = None
     progression: str | None = None
+    workout_types: Annotated[list[str] | None, Field(max_length=12)] = None
+
+    @field_validator("workout_types")
+    @classmethod
+    def _normalize_workout_types(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        cleaned: list[str] = []
+        for item in value:
+            token = str(item).strip().lower().replace(" ", "_")
+            if not token:
+                raise ValueError("workout_types entries must not be empty")
+            if not re.fullmatch(r"[a-z0-9_]+", token):
+                raise ValueError(
+                    f"workout_types entry {item!r} must be a normalized workout type "
+                    "such as strength_training"
+                )
+            if token not in cleaned:
+                cleaned.append(token)
+        return cleaned
 
 
 class Intent(_Model):
@@ -318,6 +339,7 @@ def intent_digest(intent: Intent | None, max_chars: int = 800) -> str:
             f"{program.sessions_per_week} sessions/week" if program.sessions_per_week else None,
             f"deload every {program.deload_every_weeks}w" if program.deload_every_weeks else None,
             program.progression,
+            f"counts {', '.join(program.workout_types)}" if program.workout_types else None,
         ]
         lines.append("Program: " + ", ".join(part for part in parts if part))
     if intent.notes:

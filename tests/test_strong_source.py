@@ -112,6 +112,7 @@ def test_lifting_summary_shapes_and_caches(tmp_path):
         "week_start": "2026-01-05",
         "volume_kg": 400.0,
         "moving_avg_4w": None,
+        "partial": False,
     }
     assert first["period"] == {"start": "2026-01-01", "end": "2026-01-31"}
     assert second == first

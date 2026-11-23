@@ -240,6 +240,9 @@ class StrongDataClient:
     async def me(self) -> dict[str, Any]:
         return await self._get("me")
 
+    async def exercises(self) -> dict[str, Any]:
+        return await self._get("exercises")
+
     # -- aggregates -------------------------------------------------------
     async def summary(
         self,

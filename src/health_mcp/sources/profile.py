@@ -157,6 +157,12 @@ class ProfileSource:
             out["sections"][name] = value
         if section and not out["sections"]:
             out["note"] = f"{section} is not present in profile.yaml"
+        elif not section:
+            out["sections_present"] = sorted(out["sections"])
+            out["sections_note"] = (
+                "an unfiltered call returns every authored section; pass section= to get "
+                "one (intent is the only section that also reaches the server instructions)"
+            )
         return out
 
     def tools(self) -> list[Any]:

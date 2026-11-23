@@ -309,12 +309,59 @@ def test_goal_progress_uses_the_profile_goal_and_labels_overrides(tmp_path):
 def test_goal_progress_for_workouts_comes_from_the_profile_too(tmp_path):
     settings = profile_settings(tmp_path)
     sources = build(tmp_path, settings)
-    sources["openwearables"].workout_count = async_return((10, False))  # type: ignore[method-assign]
+    calls: list[list[str] | None] = []
+
+    async def count(start, end, types=None):
+        calls.append(types)
+        return 10, False
+
+    sources["openwearables"].workout_count = count  # type: ignore[method-assign]
     out = run(compose_goal_progress(sources, "2026-11-01", "2026-11-30", "workouts"))
     assert out["sessions"] == 10
     assert out["target"] == 20
     assert out["progress_pct"] == 50.0
     assert out["deadline"] == "2026-12-31"
+    assert calls == [None]
+    assert out["target_period"] == {
+        "start": "2026-01-01",
+        "end": "2026-12-31",
+        "days": 365,
+    }
+    assert out["target_applies"] is True
+    assert "covers 365 days" in out["warning"]
+    assert "declares no workout_types" in out["warning"]
+
+
+def test_goal_progress_counts_only_the_declared_workout_types(tmp_path):
+    settings = profile_settings(tmp_path)
+    replacement = """  program: {name: Weight lifting, workout_types: [strength_training]}
+  goals:"""
+    (tmp_path / "profile" / "profile.yaml").write_text(
+        PROFILE.replace("  goals:", replacement), encoding="utf-8"
+    )
+    sources = build(tmp_path, settings)
+    calls: list[list[str] | None] = []
+
+    async def count(start, end, types=None):
+        calls.append(types)
+        return 68, False
+
+    sources["openwearables"].workout_count = count  # type: ignore[method-assign]
+    out = run(compose_goal_progress(sources, "2026-01-01", "2026-11-23", "workouts"))
+    assert calls == [["strength_training"]]
+    assert out["counted_types"] == ["strength_training"]
+    assert out["sessions"] == 68
+    assert out["progress_pct"] == 340.0
+    assert "counts only the declared workout types" in out["warning"]
+
+
+def test_goal_progress_says_a_window_outside_the_goal_period_does_not_apply(tmp_path):
+    settings = profile_settings(tmp_path)
+    sources = build(tmp_path, settings)
+    sources["openwearables"].workout_count = async_return((671, False))  # type: ignore[method-assign]
+    out = run(compose_goal_progress(sources, "2025-01-01", "2025-12-31", "workouts"))
+    assert out["target_applies"] is False
+    assert "falls outside it" in out["warning"]
 
 
 def test_goal_progress_without_a_matching_goal_explains_itself(tmp_path):
