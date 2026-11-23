@@ -408,21 +408,23 @@ def _validate_event(row: dict[str, Any], number: int) -> str | None:
             return _row_error(number, "end_date is not YYYY-MM-DD")
         if covered_to < day:
             return _row_error(number, "end_date is before date")
-    every_days = str(row.get("every_days") or "").strip()
-    if every_days:
+    every_text = str(row.get("every_days") or "").strip()
+    if every_text:
         try:
-            every = int(every_days)
+            every = int(every_text)
         except ValueError:
             return _row_error(number, "every_days is not a whole number")
         if not 1 <= every <= MAX_EVERY_DAYS:
             return _row_error(number, f"every_days must be 1-{MAX_EVERY_DAYS}")
-        if every > 1 and not end_date:
-            return _row_error(number, "every_days above 1 needs end_date")
         row["every_days"] = every
     kind = str(row["kind"]).lower()
     if kind not in EVENT_KINDS:
         return _row_error(number, f"kind is not one of {', '.join(EVENT_KINDS)}")
     row["kind"] = kind
+    if every_text and not end_date and kind not in DOSE_KINDS:
+        return _row_error(
+            number, "every_days without end_date makes an ongoing series; only doses can be ongoing"
+        )
     if row["time"]:
         try:
             datetime.strptime(row["time"], "%H:%M")

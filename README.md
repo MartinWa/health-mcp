@@ -177,7 +177,7 @@ the only writer, and it writes only there.
 ```text
 data/profile/
   profile.yaml   # updated:, plus intent / constraints / regimen / notes sections
-  events.csv     # date,time,kind,substance,dose,unit,reason,notes[,end_date,every_days]
+  events.csv     # date,time,kind,substance,dose,unit,reason,notes,end_date,every_days
 ```
 
 Each section carries its own `updated:` so `get_status` can report staleness
@@ -210,13 +210,19 @@ regimen instead of one row per day:
 
 | column | Meaning |
 | --- | --- |
-| `end_date` | the row also covers up to this date, inclusive; empty means the row's own day |
-| `every_days` | with `end_date`: one dose every N days inside that window (1–366). Above 1 it requires `end_date` |
+| `end_date` | the row also covers up to this date, inclusive; empty means the row's own day, unless `every_days` says it is ongoing |
+| `every_days` | one dose every N days from `date` (1–366). With `end_date` it stops there; **without** one it is ongoing and covers through the end of whatever range you query. Only `medication`/`supplement` rows may be ongoing |
 
 ```
-2024-09-05,08:00,medication,example-drug,50,µg,,,2026-09-30,1   # one dose daily, 757 days
+2024-09-05,08:00,medication,example-drug,50,µg,,,2026-09-30,1   # one dose daily, 757 days, then stopped
 2026-04-06,,medication,example-drug,1,dose,,,2026-09-28,7      # one dose weekly, 26 doses
-```
+2025-01-01,,medication,example-drug,1,dose,,,,1               # ongoing: daily from 2025-01-01 on
+2025-01-01,,medication,example-drug,1,dose,,,,14              # ongoing: every 14 days from 2025-01-01 on```
+
+An ongoing row has no `end_date` and is never "closed" by the data: the dose-days
+it covers stop at the queried `end_date`, and `get_medicine_logs`, adherence and
+impact all treat the latest query window as its extent. There is no "today" in the
+file, so the same row means "still taken" until an `end_date` is added.
 
 A row with a window counts as one dose per covered day, not one dose: `count`
 in `get_medicine_logs` becomes a number of dose-days, `dose_total` sums

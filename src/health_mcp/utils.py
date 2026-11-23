@@ -119,25 +119,31 @@ def event_days(
 ) -> list[str]:
     """The local days one event row covers, clipped to the queried range.
 
-    A row with no `end_day` covers its own date. With one, it covers every
-    `every_days`-th day from its first date to `end_day` inclusive, so a daily
-    medication is one row rather than one row per day. The step is anchored to the
-    row's own first date, so clipping the start of the range never shifts the grid.
+    A row with no `end_day` and no `every_days` covers its own date. With an
+    `end_day` it covers every `every_days`-th day from its first date to that day
+    inclusive, so a daily medication is one row rather than one row per day. An
+    `every_days` without an `end_day` is an ongoing series: it repeats through the
+    end of the queried range. The step is anchored to the row's own first date, so
+    clipping the start of the range never shifts the grid.
     """
     try:
         first = parse_date(day)
     except ValueError:
         return []
-    last = first
+    last: date | None
     if end_day:
         try:
             last = max(parse_date(end_day), first)
         except ValueError:
             last = first
+    elif every_days:
+        last = None
+    else:
+        last = first
     step = max(int(every_days or 1), 1)
     low, high = parse_date(start_date), parse_date(end_date)
-    stop = min(last, high)
-    if first > high or last < low:
+    stop = high if last is None else min(last, high)
+    if first > high or (last is not None and last < low):
         return []
     offset = max((low - first).days, 0)
     current = first + timedelta(days=offset - offset % step)
